@@ -138,6 +138,8 @@ jobs:
           cat << 'EOF' > "$HOOK_DIR/sitecustomize.py"
           import os
           import sys
+          import asyncio
+          import random
 
           def _install_playwright_proxy_hook():
               proxy_url = os.environ.get("LOCAL_XRAY_PROXY", "socks5://127.0.0.1:10808").strip()
@@ -166,7 +168,64 @@ jobs:
               _bt.BrowserType.launch = _patched_launch
               _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
 
+          def _install_humanized_sender_hook():
+              try:
+                  import app.sender as _sender
+              except ImportError:
+                  return
+
+              def _fetch_hitokoto():
+                  try:
+                      import urllib.request as _req
+                      import json as _json
+                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=i&c=k&c=h&c=j&max_length=28", headers={"User-Agent": "Mozilla/5.0"})
+                      with _req.urlopen(r, timeout=5) as resp:
+                          d = _json.loads(resp.read().decode("utf-8"))
+                          h = d.get("hitokoto", "").strip()
+                          auth = d.get("from_who") or d.get("from")
+                          return f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
+                  except Exception:
+                      return "去热爱生活，去奔赴山海。"
+
+              _orig_send_text = _sender.send_text
+              _orig_send_message = _sender.send_message
+
+              async def _patched_send_message(page, chat, message, stickers):
+                  if message.type == "text" and message.value:
+                      val = message.value
+                      if "[API]" in val or "[一言]" in val or val == "一言":
+                        q = _fetch_hitokoto()
+                        val = val.replace("[API]", q).replace("[一言]", q) if ("[API]" in val or "[一言]" in val) else q
+                        message = type(message)(type="text", value=val)
+                  return await _orig_send_message(page, chat, message, stickers)
+
+              async def _patched_send_text(chat, content):
+                  editor = await chat.message_input()
+                  page = editor.page
+                  await editor.click()
+                  await asyncio.sleep(random.uniform(0.6, 1.2))
+
+                  # 拟真打字节奏输入
+                  for char in content:
+                      await page.keyboard.type(char)
+                      if char in "，。！？；、,.!?":
+                          await asyncio.sleep(random.uniform(0.35, 0.55))
+                      else:
+                          await asyncio.sleep(random.uniform(0.12, 0.25))
+
+                  await asyncio.sleep(random.uniform(1.0, 1.8))
+
+                  before = await _sender._mark_latest_outgoing_message(page)
+                  await page.wait_for_timeout(300)
+                  await _sender._trigger_send(page)
+                  await _sender._confirm_outgoing_message(page, before, label="文本", expected_text=content)
+
+              _sender.send_message = _patched_send_message
+              _sender.send_text = _patched_send_text
+              print("[HumanizeHook] 已无侵入挂载一言动态文本与拟人化慢速打字防风控逻辑", flush=True)
+
           _install_playwright_proxy_hook()
+          _install_humanized_sender_hook()
           EOF
 
           echo "PYTHONPATH=${HOOK_DIR}:${PYTHONPATH}" >> "$GITHUB_ENV"
@@ -176,7 +235,7 @@ jobs:
           if [ -n "$SITE_PKG" ] && [ -d "$SITE_PKG" ]; then
             cp "$HOOK_DIR/sitecustomize.py" "$SITE_PKG/sitecustomize.py"
           fi
-          echo "sitecustomize.py 零侵入代理钩子注入完成！"
+          echo "sitecustomize.py 零侵入代理与拟人化钩子注入完成！"
 
       - name: Run
         shell: bash
