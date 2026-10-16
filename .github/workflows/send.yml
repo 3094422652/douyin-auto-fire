@@ -171,6 +171,7 @@ jobs:
           def _install_humanized_sender_hook():
               try:
                   import app.sender as _sender
+                  from app.douyin import PageOperationError
               except ImportError:
                   return
 
@@ -187,16 +188,16 @@ jobs:
                   except Exception:
                       return "去热爱生活，去奔赴山海。"
 
-              _orig_send_text = _sender.send_text
               _orig_send_message = _sender.send_message
 
               async def _patched_send_message(page, chat, message, stickers):
-                  if message.type == "text" and message.value:
-                      val = message.value
+                  if message.type == "text" and message.content:
+                      val = message.content
                       if "[API]" in val or "[一言]" in val or val == "一言":
-                        q = _fetch_hitokoto()
-                        val = val.replace("[API]", q).replace("[一言]", q) if ("[API]" in val or "[一言]" in val) else q
-                        message = type(message)(type="text", value=val)
+                          q = _fetch_hitokoto()
+                          val = val.replace("[API]", q).replace("[一言]", q) if ("[API]" in val or "[一言]" in val) else q
+                          message = type(message)(type="text", content=val)
+                          print(f"[HumanizeHook] 动态解析一言内容: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
@@ -212,6 +213,18 @@ jobs:
                           await asyncio.sleep(random.uniform(0.35, 0.55))
                       else:
                           await asyncio.sleep(random.uniform(0.12, 0.25))
+
+                  try:
+                      await page.wait_for_function(
+                          """([txt]) => {
+                              const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
+                              return es.some(e => (e.innerText || '').includes(txt));
+                          }""",
+                          arg=[content],
+                          timeout=5000,
+                      )
+                  except Exception as exc:
+                      raise PageOperationError("输入未写入编辑框") from exc
 
                   await asyncio.sleep(random.uniform(1.0, 1.8))
 
