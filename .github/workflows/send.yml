@@ -227,9 +227,9 @@ jobs:
                   timeout = 2.5
                   headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-                  # 1. P1: Hitokoto (modern categories: d, e, h, j, k)
+                  # 1. P1: Hitokoto (categories: a, b, d, e, f, g, k, l, max_length=300)
                   try:
-                      r = _req.Request("https://v1.hitokoto.cn/?c=a&c=b&c=d&c=e&c=f&c=g&c=k&c=l&max_length=28", headers=headers)
+                      r = _req.Request("https://v1.hitokoto.cn/?c=a&c=b&c=d&c=e&c=f&c=g&c=k&c=l&max_length=300", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           h = _clean_text(data.get("hitokoto", ""))
@@ -241,13 +241,15 @@ jobs:
                               text = f"{h} \u2014\u2014 {auth}"
                           else:
                               text = h
+                          if len(text) > 300:
+                              text = text[:297] + "..."
                           if text:
                               print(f"[QuoteFetcher] Hitokoto -> {text}", flush=True)
                               return text
                   except Exception as e:
                       print(f"[QuoteFetcher] Hitokoto err ({type(e).__name__}), fallback to P2", flush=True)
 
-                  # 2. P2: xygeng API
+                  # 2. P2: xygeng API (no artificial truncation under 300 chars)
                   try:
                       r = _req.Request("https://api.xygeng.cn/one", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
@@ -255,13 +257,6 @@ jobs:
                           d = data.get("data")
                           raw = (d.get("content") if isinstance(d, dict) else "") or ""
                           text = _clean_text(raw)
-                          if len(text) > 36:
-                              split_pts = [m.end() for m in re.finditer(r'[\u3002\uff01\uff1f!?]', text)]
-                              valid_splits = [p for p in split_pts if 10 <= p <= 36]
-                              if valid_splits:
-                                  text = text[:valid_splits[0]]
-                              else:
-                                  text = text[:32] + "..."
                           if isinstance(d, dict):
                               auth = _clean_text(_format_author(d.get("name"), d.get("origin")))
                               if auth:
@@ -269,6 +264,8 @@ jobs:
                                       if text.endswith(ch):
                                           text = text[:-1]
                                   text = f"{text} \u2014\u2014 {auth}"
+                          if len(text) > 300:
+                              text = text[:297] + "..."
                           if text:
                               print(f"[QuoteFetcher] xygeng -> {text}", flush=True)
                               return text
@@ -280,20 +277,24 @@ jobs:
                       r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           text = _clean_text(resp.read().decode("utf-8"))
+                          if len(text) > 300:
+                              text = text[:297] + "..."
                           if text:
                               print(f"[QuoteFetcher] SweetNothings -> {text}", flush=True)
                               return text
                   except Exception as e:
                       print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P4", flush=True)
 
-                  # 4. P4: Iciba
+                  # 4. P4: Iciba (keep bilingual if en + zh <= 300 chars)
                   try:
                       r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           zh = _clean_text(data.get("note", ""))
                           en = _clean_text(data.get("content", ""))
-                          text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) < 45) else (zh or en)
+                          text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) + 2 <= 300) else (zh or en)
+                          if len(text) > 300:
+                              text = text[:297] + "..."
                           if text:
                               print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
                               return text
@@ -335,29 +336,37 @@ jobs:
                           else:
                               val = q
                           val = _clean_text(val)
+                          if len(val) > 300:
+                              val = val[:297] + "..."
                           message = type(message)(type="text", content=val)
                           print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
                   content = _clean_text(content)
+                  if len(content) > 300:
+                      content = content[:297] + "..."
                   editor = await chat.message_input()
                   page = editor.page
                   await editor.click()
                   await asyncio.sleep(random.uniform(0.6, 1.2))
 
+                  # Dynamic typing cadence: humanized and responsive for up to 300 characters
+                  speed = random.uniform(0.04, 0.08) if len(content) > 50 else random.uniform(0.09, 0.18)
+                  p_speed = random.uniform(0.18, 0.30) if len(content) > 50 else random.uniform(0.30, 0.45)
                   for char in content:
                       await page.keyboard.insert_text(char)
                       if char in "\uff0c\u3002\uff01\uff1f\uff1b\u3001,.!?":
-                          await asyncio.sleep(random.uniform(0.35, 0.55))
+                          await asyncio.sleep(p_speed)
                       else:
-                          await asyncio.sleep(random.uniform(0.12, 0.25))
+                          await asyncio.sleep(speed)
 
                   try:
                       await page.wait_for_function(
                           """([txt]) => {
                               const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
-                              return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(txt.replace(/\s+/g, ' ')));
+                              const target = txt.slice(0, 30).replace(/\s+/g, ' ');
+                              return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(target));
                           }""",
                           arg=[content],
                           timeout=5000,
