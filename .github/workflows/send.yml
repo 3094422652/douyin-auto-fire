@@ -208,45 +208,44 @@ jobs:
                   timeout = 2.5
                   headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-                  # 1. 优先调用：韩小韩 Web API
+                  # 1. 第一优先：一言 (Hitokoto 纯现代治愈 / 影视台词 / 网易云热评，排除古诗词)
                   try:
-                      r = _req.Request("https://api.vvhan.com/api/ian/rand?type=json", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          text = (data.get("data", {}).get("content") or data.get("content") or "").strip()
-                          if text:
-                              print(f"[QuoteFetcher] 命中优先级 1: 韩小韩 API -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 1 韩小韩 API 超时/异常 ({type(e).__name__})，切换优先级 2", flush=True)
-
-                  # 2. 其次调用：TenAPI 每日一言
-                  try:
-                      r = _req.Request("https://tenapi.cn/v2/yiyan", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          text = (data.get("data", {}).get("content") or data.get("content") or "").strip()
-                          if text:
-                              print(f"[QuoteFetcher] 命中优先级 2: TenAPI -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 2 TenAPI 超时/异常 ({type(e).__name__})，切换优先级 3", flush=True)
-
-                  # 3. 再次调用：一言（Hitokoto）
-                  try:
-                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=i&c=k&c=h&c=j&max_length=28", headers=headers)
+                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=e&c=h&c=j&c=k&max_length=28", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           h = data.get("hitokoto", "").strip()
                           auth = data.get("from_who") or data.get("from")
                           text = f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
                           if text:
-                              print(f"[QuoteFetcher] 命中优先级 3: Hitokoto 一言 -> {text}", flush=True)
+                              print(f"[QuoteFetcher] 命中优先级 1: 一言·现代治愈 -> {text}", flush=True)
                               return text
                   except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 3 Hitokoto 超时/异常 ({type(e).__name__})，切换优先级 4", flush=True)
+                      print(f"[QuoteFetcher] 优先级 1 一言异常 ({type(e).__name__})，切换优先级 2", flush=True)
 
-                  # 4. 最后调用：金山词霸·每日一句
+                  # 2. 第二优先：xygeng 壹思 API (现代生活哲学与情感励志金句)
+                  try:
+                      r = _req.Request("https://api.xygeng.cn/one", headers=headers)
+                      with _req.urlopen(r, timeout=timeout) as resp:
+                          data = _json.loads(resp.read().decode("utf-8"))
+                          text = (data.get("data", {}).get("content") or "").strip()
+                          if text:
+                              print(f"[QuoteFetcher] 命中优先级 2: xygeng 壹思 API -> {text}", flush=True)
+                              return text
+                  except Exception as e:
+                      print(f"[QuoteFetcher] 优先级 2 xygeng 壹思异常 ({type(e).__name__})，切换优先级 3", flush=True)
+
+                  # 3. 第三优先：每日暖心短句 API (SweetNothings 温情日常短句)
+                  try:
+                      r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
+                      with _req.urlopen(r, timeout=timeout) as resp:
+                          text = resp.read().decode("utf-8").strip()
+                          if text:
+                              print(f"[QuoteFetcher] 命中优先级 3: 每日暖心短句 -> {text}", flush=True)
+                              return text
+                  except Exception as e:
+                      print(f"[QuoteFetcher] 优先级 3 每日暖心短句异常 ({type(e).__name__})，切换优先级 4", flush=True)
+
+                  # 4. 第四优先：金山词霸·每日一句 (现代名言/电影台词地道中文译文)
                   try:
                       r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
@@ -255,23 +254,23 @@ jobs:
                           en = data.get("content", "").strip()
                           text = f"{en}（{zh}）" if (en and zh and len(en) + len(zh) < 45) else (zh or en)
                           if text:
-                              print(f"[QuoteFetcher] 命中优先级 4: 金山词霸 -> {text}", flush=True)
+                              print(f"[QuoteFetcher] 命中优先级 4: 金山词霸每日一句 -> {text}", flush=True)
                               return text
                   except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 4 金山词霸超时/异常 ({type(e).__name__})，启动本地精选词库", flush=True)
+                      print(f"[QuoteFetcher] 优先级 4 金山词霸异常 ({type(e).__name__})，启动本地精选现代词库", flush=True)
 
                   fallback_pool = [
                       "去热爱生活，去奔赴山海。",
                       "愿你历尽千帆，归来仍是少年。",
-                      "星光不问赶路人，岁月不负有心人。",
-                      "山高水长，江湖莫忘。",
+                      "生活原本沉闷，但跑起来就有风。",
                       "日落尤其温柔，人间皆是浪漫。",
                       "知足且上进，温柔且坚定。",
                       "春来夏往，秋收冬藏，我们来日方长。",
-                      "满怀希望，就会所向披靡。"
+                      "满怀希望，就会所向披靡。",
+                      "生活明朗，万物可爱，人间值得，未来可期。"
                   ]
                   fb = random.choice(fallback_pool)
-                  print(f"[QuoteFetcher] 命中本地精选词库 -> {fb}", flush=True)
+                  print(f"[QuoteFetcher] 命中本地精选纯现代词库 -> {fb}", flush=True)
                   return fb
 
               _orig_send_message = _sender.send_message
@@ -321,7 +320,7 @@ jobs:
 
               _sender.send_message = _patched_send_message
               _sender.send_text = _patched_send_text
-              print("[HumanizeHook] 已无侵入挂载多源金句与拟人化慢速打字防风控逻辑", flush=True)
+              print("[HumanizeHook] 已无侵入挂载纯现代多源金句与拟人化慢速打字防风控逻辑", flush=True)
 
           _install_playwright_proxy_hook()
           _install_humanized_sender_hook()
