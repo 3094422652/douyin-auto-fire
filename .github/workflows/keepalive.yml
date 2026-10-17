@@ -1,0 +1,30 @@
+name: Keepalive (防 60 天自动休眠)
+
+on:
+  schedule:
+    # 每月 1 号 00:00 UTC（北京时间 08:00）自动执行一次空提交，防止 GitHub 暂停定时任务
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Make keepalive commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TODAY=$(date -u +%Y-%m-%d)
+          git commit --allow-empty -m "chore(keepalive): monthly automated heartbeat ($TODAY) [skip ci]"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" HEAD:main
