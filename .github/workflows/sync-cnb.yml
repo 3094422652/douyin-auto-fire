@@ -1,21 +1,19 @@
 name: Sync Code to CNB
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -25,6 +23,10 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         shell: bash
         run: |
+          if [ -z "$CNB_TOKEN" ]; then
+            echo "CNB_TOKEN not configured. Skipping sync."
+            exit 0
+          fi
           cat > "$RUNNER_TEMP/cnb-askpass.sh" <<'EOF'
           #!/bin/sh
           case "$1" in
