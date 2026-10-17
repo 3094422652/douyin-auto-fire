@@ -216,6 +216,9 @@ jobs:
                       who = ""
                   if frm in ("null", "None", "\u539f\u521b", "\u7f51\u7edc", "\u4e00\u4e2a\u9ad8\u4e09"):
                       frm = ""
+                  for ch in ("\u300a", "\u300b", "<", ">"):
+                      if frm.startswith(ch) and frm.endswith(ch):
+                          frm = frm[1:-1].strip()
                   if who and frm and who != frm:
                       return f"{who}\u300a{frm}\u300b"
                   return who or frm
@@ -326,16 +329,14 @@ jobs:
                   if message.type == "text" and message.content:
                       val = message.content
                       v_stripped = val.strip()
-                      triggers = ("[API]", "\u4e00\u8a00", "[\u4e00\u8a00]", "[\u91d1\u53e5]", "[\u6bcf\u65e5\u4e00\u53e5]")
-                      exact_matches = ("\u4e00\u8a00", "\u91d1\u53e5", "\u6bcf\u65e5\u4e00\u53e5", "API", "api")
-                      if any(t in val for t in triggers) or v_stripped in exact_matches:
-                          q = _fetch_quote()
-                          if any(t in val for t in triggers):
-                              for t in triggers:
-                                  val = val.replace(t, q)
-                          else:
+                      trigger_pattern = re.compile(r"\[(?:API|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5)\]|\bAPI\b|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5")
+                      exact_matches = ("\u4e00\u8a00", "\u91d1\u53e5", "\u6bcf\u65e5\u4e00\u53e5", "API", "api", "[\u4e00\u8a00]", "[\u91d1\u53e5]", "[\u6bcf\u65e5\u4e00\u53e5]", "[API]")
+                      if v_stripped in exact_matches or trigger_pattern.search(val):
+                          q = _clean_text(_fetch_quote())
+                          if v_stripped in exact_matches:
                               val = q
-                          val = _clean_text(val)
+                          else:
+                              val = _clean_text(trigger_pattern.sub(lambda _: q, val, count=1))
                           if len(val) > 100:
                               val = val[:97] + "..."
                           message = type(message)(type="text", content=val)
@@ -363,7 +364,7 @@ jobs:
 
                   try:
                       await page.wait_for_function(
-                          """([txt]) => {
+                          r"""([txt]) => {
                               const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
                               const target = txt.slice(0, 30).replace(/\s+/g, ' ');
                               return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(target));
@@ -379,7 +380,7 @@ jobs:
                   before = await _sender._mark_latest_outgoing_message(page)
                   await page.wait_for_timeout(300)
                   await _sender._trigger_send(page)
-                  await _sender._confirm_outgoing_message(page, before, label="text", expected_text=content)
+                  await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
 
               _sender.send_message = _patched_send_message
               _sender.send_text = _patched_send_text
