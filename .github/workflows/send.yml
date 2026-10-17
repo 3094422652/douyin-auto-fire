@@ -177,8 +177,7 @@ jobs:
                   if not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch 已强制绑定本地 Xray 隧道: {proxy_url}", flush=True)
-                  if "args" not in kwargs or not kwargs["args"]:
-                      kwargs["args"] = []
+                  kwargs["args"] = list(kwargs.get("args") or [])
                   if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
                       kwargs["args"].append("--disable-blink-features=AutomationControlled")
                   return await _orig_launch(self, *args, **kwargs)
@@ -187,8 +186,7 @@ jobs:
                   if not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch_persistent_context 已强制绑定本地 Xray 隧道: {proxy_url}", flush=True)
-                  if "args" not in kwargs or not kwargs["args"]:
-                      kwargs["args"] = []
+                  kwargs["args"] = list(kwargs.get("args") or [])
                   if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
                       kwargs["args"].append("--disable-blink-features=AutomationControlled")
                   return await _orig_launch_persistent(self, *args, **kwargs)
@@ -223,6 +221,8 @@ jobs:
                           data = _json.loads(resp.read().decode("utf-8"))
                           h = _clean_text(data.get("hitokoto", ""))
                           auth = _clean_text(data.get("from_who") or data.get("from") or "")
+                          if auth in ("null", "None", ""):
+                              auth = ""
                           text = f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
                           if text:
                               print(f"[QuoteFetcher] 命中优先级 1: 一言·现代治愈 -> {text}", flush=True)
@@ -235,7 +235,8 @@ jobs:
                       r = _req.Request("https://api.xygeng.cn/one", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
-                          raw = data.get("data", {}).get("content") or ""
+                          d = data.get("data")
+                          raw = (d.get("content") if isinstance(d, dict) else "") or ""
                           text = _clean_text(raw)
                           # 若文本过长或包含多句，截取首个完整分句保持精悍优雅
                           if len(text) > 36:
@@ -296,11 +297,15 @@ jobs:
               async def _patched_send_message(page, chat, message, stickers):
                   if message.type == "text" and message.content:
                       val = message.content
-                      # 支持关键字触发：[API]、[一言]、[金句] 或配置文本完全等于 "一言"
-                      if "[API]" in val or "[一言]" in val or val == "一言" or "[金句]" in val:
+                      # 支持关键字触发：[API]、[一言]、[金句]、[每日一句] 或配置文本完全等于 "一言" / "金句" / "每日一句"
+                      v_stripped = val.strip()
+                      triggers = ("[API]", "[一言]", "[金句]", "[每日一句]")
+                      exact_matches = ("一言", "金句", "每日一句", "API", "api")
+                      if any(t in val for t in triggers) or v_stripped in exact_matches:
                           q = _fetch_quote()
-                          if "[API]" in val or "[一言]" in val or "[金句]" in val:
-                              val = val.replace("[API]", q).replace("[一言]", q).replace("[金句]", q)
+                          if any(t in val for t in triggers):
+                              for t in triggers:
+                                  val = val.replace(t, q)
                           else:
                               val = q
                           val = _clean_text(val)
@@ -315,9 +320,9 @@ jobs:
                   await editor.click()
                   await asyncio.sleep(random.uniform(0.6, 1.2))
 
-                  # 拟真打字节奏输入，杜绝瞬间粘贴与回车换行断句异常
+                  # 拟真打字节奏输入，使用 insert_text 确保跨平台 CJK / 表情符号绝对兼容
                   for char in content:
-                      await page.keyboard.type(char)
+                      await page.keyboard.insert_text(char)
                       if char in "，。！？；、,.!?":
                           await asyncio.sleep(random.uniform(0.35, 0.55))
                       else:
@@ -327,7 +332,7 @@ jobs:
                       await page.wait_for_function(
                           """([txt]) => {
                               const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
-                              return es.some(e => (e.innerText || '').includes(txt));
+                              return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(txt.replace(/\s+/g, ' ')));
                           }""",
                           arg=[content],
                           timeout=5000,
@@ -422,4 +427,5 @@ jobs:
         with:
           name: douyin-encrypted-diagnostics-${{ github.run_id }}
           path: /tmp/encrypted_out/diagnostics.7z
+          if-no-files-found: ignore
           retention-days: 3
