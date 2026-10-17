@@ -42,6 +42,7 @@ jobs:
         uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -204,7 +205,7 @@ jobs:
               def _clean_text(s):
                   if not s:
                       return ""
-                  s = re.sub(r"[\r\n\t]+", " ", s).strip()
+                  s = re.sub(r"\s+", " ", s).strip()
                   for ch in ("\u201c", "\u201d", "\"", "\u300c", "\u300d", "\u300e", "\u300f"):
                       s = s.strip(ch)
                   return s.strip()
@@ -219,6 +220,8 @@ jobs:
                   for ch in ("\u300a", "\u300b", "<", ">"):
                       if frm.startswith(ch) and frm.endswith(ch):
                           frm = frm[1:-1].strip()
+                      if who.startswith(ch) and who.endswith(ch):
+                          who = who[1:-1].strip()
                   if who and frm and who != frm:
                       return f"{who}\u300a{frm}\u300b"
                   return who or frm
@@ -366,7 +369,7 @@ jobs:
                       await page.wait_for_function(
                           r"""([txt]) => {
                               const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
-                              const target = txt.slice(0, 30).replace(/\s+/g, ' ');
+                              const target = [...txt].slice(0, 30).join('').replace(/\s+/g, ' ');
                               return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(target));
                           }""",
                           arg=[content],
