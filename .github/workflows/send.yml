@@ -280,17 +280,46 @@ jobs:
             python run.py
           fi
 
-      - name: Sanitize diagnostics
+      - name: Encrypt diagnostics artifacts (7-Zip AES-256)
         if: failure()
         shell: bash
+        env:
+          ARTIFACT_PASSWORD: ${{ secrets.ARTIFACT_PASSWORD }}
         run: |
-          # 彻底移除包含 Cookie/网络请求头的 Playwright trace 抓包，防止凭据外泄
+          set -e
+          # 1. 彻底移除包含 Cookie/网络请求头的 Playwright trace 抓包，防止凭据外泄
           rm -rf artifacts/traces
 
-      - name: Upload diagnostics
+          # 2. 检查是否有需要加密上传的诊断文件
+          if [ ! -d "artifacts" ] || [ -z "$(ls -A artifacts 2>/dev/null)" ]; then
+            echo "无诊断文件生成，跳过加密打包"
+            exit 0
+          fi
+
+          # 3. 安全熔断：未配置密码则严禁明文上传
+          if [ -z "$ARTIFACT_PASSWORD" ]; then
+            echo "::warning::未检测到 ARTIFACT_PASSWORD 密钥，为防止明文泄露，已自动阻断附件上传！"
+            rm -rf artifacts
+            exit 0
+          fi
+
+          # 4. 确保 7-Zip (7z) 工具就绪
+          if ! command -v 7z &> /dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+          fi
+
+          # 5. 使用 7-Zip 进行 AES-256 全量加密打包（-mhe=on 开启文件名头部强加密）
+          mkdir -p /tmp/encrypted_out
+          7z a -t7z -p"$ARTIFACT_PASSWORD" -mhe=on -mx=9 /tmp/encrypted_out/diagnostics.7z ./artifacts/*
+          
+          # 清除原始明文目录
+          rm -rf artifacts
+          echo "诊断产物已成功通过 AES-256 强加密打包（文件名已隐藏）！"
+
+      - name: Upload encrypted diagnostics
         if: failure()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: douyin-failure-${{ github.run_id }}
-          path: artifacts/
+          name: douyin-encrypted-diagnostics-${{ github.run_id }}
+          path: /tmp/encrypted_out/diagnostics.7z
           retention-days: 3
