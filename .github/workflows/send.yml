@@ -227,7 +227,7 @@ jobs:
                   timeout = 2.5
                   headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-                  # 1. P1: Hitokoto (categories: a, b, d, e, f, g, k, l, max_length=300)
+                  # 1. P1: Hitokoto (categories: a, b, d, e, f, g, k, l, max_length=100)
                   try:
                       r = _req.Request("https://v1.hitokoto.cn/?c=a&c=b&c=d&c=e&c=f&c=g&c=k&c=l&max_length=300", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
@@ -249,7 +249,7 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] Hitokoto err ({type(e).__name__}), fallback to P2", flush=True)
 
-                  # 2. P2: xygeng API (no artificial truncation under 300 chars)
+                  # 2. P2: xygeng API (no artificial truncation under 100 chars)
                   try:
                       r = _req.Request("https://api.xygeng.cn/one", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
@@ -285,14 +285,14 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P4", flush=True)
 
-                  # 4. P4: Iciba (keep bilingual if en + zh <= 300 chars)
+                  # 4. P4: Iciba (keep bilingual if en + zh <= 100 chars)
                   try:
                       r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           zh = _clean_text(data.get("note", ""))
                           en = _clean_text(data.get("content", ""))
-                          text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) + 2 <= 300) else (zh or en)
+                          text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) + 2 <= 100) else (zh or en)
                           if len(text) > 300:
                               text = text[:297] + "..."
                           if text:
@@ -351,7 +351,7 @@ jobs:
                   await editor.click()
                   await asyncio.sleep(random.uniform(0.6, 1.2))
 
-                  # Dynamic typing cadence: humanized and responsive for up to 300 characters
+                  # Dynamic typing cadence: humanized and responsive for up to 100 characters
                   speed = random.uniform(0.04, 0.08) if len(content) > 50 else random.uniform(0.09, 0.18)
                   p_speed = random.uniform(0.18, 0.30) if len(content) > 50 else random.uniform(0.30, 0.45)
                   for char in content:
