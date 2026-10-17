@@ -144,6 +144,7 @@ jobs:
             cat /tmp/xray/xray.log
             exit 1
           fi
+          PROXY_IP=$(echo "$PROXY_IP" | tr -d '\r\n[:space:]')
           echo "::add-mask::$PROXY_IP"
           echo "代理隧道校验通过！当前加密出口 IP: ${PROXY_IP}"
 
@@ -194,6 +195,19 @@ jobs:
               _bt.BrowserType.launch = _patched_launch
               _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
 
+              try:
+                  import playwright._impl._browser as _b
+                  _orig_new_context = _b.Browser.new_context
+
+                  async def _patched_new_context(self, *args, **kwargs):
+                      if "timezone_id" not in kwargs or not kwargs["timezone_id"]:
+                          kwargs["timezone_id"] = "Asia/Shanghai"
+                      return await _orig_new_context(self, *args, **kwargs)
+
+                  _b.Browser.new_context = _patched_new_context
+              except Exception:
+                  pass
+
           def _install_humanized_sender_hook():
               try:
                   import app.sender as _sender
@@ -219,10 +233,12 @@ jobs:
                       r = _req.Request("https://v1.hitokoto.cn/?c=d&c=e&c=h&c=j&c=k&max_length=28", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
-                          h = _clean_text(data.get("hitokoto", ""))
+                          h = _clean_text(data.get("hitokoto", "")).strip('“”"'「」')
                           auth = _clean_text(data.get("from_who") or data.get("from") or "")
                           if auth in ("null", "None", ""):
                               auth = ""
+                          if auth and h.endswith(("。", "！", "!", ".")):
+                              h = h.rstrip("。！!.")
                           text = f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
                           if text:
                               print(f"[QuoteFetcher] 命中优先级 1: 一言·现代治愈 -> {text}", flush=True)
@@ -286,7 +302,11 @@ jobs:
                       "知足且上进，温柔且坚定。",
                       "春来夏往，秋收冬藏，我们来日方长。",
                       "满怀希望，就会所向披靡。",
-                      "生活明朗，万物可爱，人间值得，未来可期。"
+                      "生活明朗，万物可爱，人间值得，未来可期。",
+                      "保持热爱，奔赴下一场山海。",
+                      "把细碎的日子过成诗，简单且温暖。",
+                      "追光的人，终会万丈光芒。",
+                      "心有繁花，一路生香。"
                   ]
                   fb = random.choice(fallback_pool)
                   print(f"[QuoteFetcher] 命中本地精选纯现代词库 -> {fb}", flush=True)
