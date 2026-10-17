@@ -280,6 +280,13 @@ jobs:
             python run.py
           fi
 
+      - name: Sanitize diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          # 彻底移除包含 Cookie/网络请求头的 Playwright trace 抓包，防止凭据外泄
+          rm -rf artifacts/traces
+
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
