@@ -194,19 +194,6 @@ jobs:
               _bt.BrowserType.launch = _patched_launch
               _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
 
-              try:
-                  import playwright._impl._browser as _b
-                  _orig_new_context = _b.Browser.new_context
-
-                  async def _patched_new_context(self, *args, **kwargs):
-                      if "timezone_id" not in kwargs or not kwargs["timezone_id"]:
-                          kwargs["timezone_id"] = "Asia/Shanghai"
-                      return await _orig_new_context(self, *args, **kwargs)
-
-                  _b.Browser.new_context = _patched_new_context
-              except Exception:
-                  pass
-
           def _install_humanized_sender_hook():
               try:
                   import app.sender as _sender
