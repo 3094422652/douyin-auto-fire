@@ -229,7 +229,7 @@ jobs:
 
                   # 1. P1: Hitokoto (categories: a, b, d, e, f, g, k, l, max_length=100)
                   try:
-                      r = _req.Request("https://v1.hitokoto.cn/?c=a&c=b&c=d&c=e&c=f&c=g&c=k&c=l&max_length=300", headers=headers)
+                      r = _req.Request("https://v1.hitokoto.cn/?c=a&c=b&c=d&c=e&c=f&c=g&c=k&c=l&max_length=100", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           h = _clean_text(data.get("hitokoto", ""))
@@ -241,8 +241,8 @@ jobs:
                               text = f"{h} \u2014\u2014 {auth}"
                           else:
                               text = h
-                          if len(text) > 300:
-                              text = text[:297] + "..."
+                          if len(text) > 100:
+                              text = text[:97] + "..."
                           if text:
                               print(f"[QuoteFetcher] Hitokoto -> {text}", flush=True)
                               return text
@@ -264,8 +264,8 @@ jobs:
                                       if text.endswith(ch):
                                           text = text[:-1]
                                   text = f"{text} \u2014\u2014 {auth}"
-                          if len(text) > 300:
-                              text = text[:297] + "..."
+                          if len(text) > 100:
+                              text = text[:97] + "..."
                           if text:
                               print(f"[QuoteFetcher] xygeng -> {text}", flush=True)
                               return text
@@ -277,8 +277,8 @@ jobs:
                       r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           text = _clean_text(resp.read().decode("utf-8"))
-                          if len(text) > 300:
-                              text = text[:297] + "..."
+                          if len(text) > 100:
+                              text = text[:97] + "..."
                           if text:
                               print(f"[QuoteFetcher] SweetNothings -> {text}", flush=True)
                               return text
@@ -293,8 +293,8 @@ jobs:
                           zh = _clean_text(data.get("note", ""))
                           en = _clean_text(data.get("content", ""))
                           text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) + 2 <= 100) else (zh or en)
-                          if len(text) > 300:
-                              text = text[:297] + "..."
+                          if len(text) > 100:
+                              text = text[:97] + "..."
                           if text:
                               print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
                               return text
@@ -336,16 +336,16 @@ jobs:
                           else:
                               val = q
                           val = _clean_text(val)
-                          if len(val) > 300:
-                              val = val[:297] + "..."
+                          if len(val) > 100:
+                              val = val[:97] + "..."
                           message = type(message)(type="text", content=val)
                           print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
                   content = _clean_text(content)
-                  if len(content) > 300:
-                      content = content[:297] + "..."
+                  if len(content) > 100:
+                      content = content[:97] + "..."
                   editor = await chat.message_input()
                   page = editor.page
                   await editor.click()
