@@ -139,7 +139,7 @@ jobs:
           sleep 3
 
           echo "[3/3] 正在校验代理隧道连通性与出口 IP..."
-          if ! PROXY_IP=$(curl -sS --fail --max-time 15 --retry 2 --socks5-hostname 127.0.0.1:10808 https://api.ip.sb/ip); then
+          if ! PROXY_IP=$(curl -sS --fail --max-time 12 --retry 2 --socks5-hostname 127.0.0.1:10808 https://api.ip.sb/ip 2>/dev/null || curl -sS --fail --max-time 12 --retry 2 --socks5-hostname 127.0.0.1:10808 https://icanhazip.com 2>/dev/null); then
             echo "::error::Xray 代理隧道连接失败！以下为 Xray 运行日志："
             cat /tmp/xray/xray.log
             exit 1
@@ -175,12 +175,20 @@ jobs:
                   if not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch 已强制绑定本地 Xray 隧道: {proxy_url}", flush=True)
+                  if "args" not in kwargs or not kwargs["args"]:
+                      kwargs["args"] = []
+                  if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
+                      kwargs["args"].append("--disable-blink-features=AutomationControlled")
                   return await _orig_launch(self, *args, **kwargs)
 
               async def _patched_launch_persistent(self, *args, **kwargs):
                   if not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch_persistent_context 已强制绑定本地 Xray 隧道: {proxy_url}", flush=True)
+                  if "args" not in kwargs or not kwargs["args"]:
+                      kwargs["args"] = []
+                  if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
+                      kwargs["args"].append("--disable-blink-features=AutomationControlled")
                   return await _orig_launch_persistent(self, *args, **kwargs)
 
               _bt.BrowserType.launch = _patched_launch
@@ -193,29 +201,89 @@ jobs:
               except ImportError:
                   return
 
-              def _fetch_hitokoto():
+              def _fetch_quote():
+                  import urllib.request as _req
+                  import json as _json
+
+                  timeout = 2.5
+                  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+                  # 1. 优先调用：韩小韩 Web API
                   try:
-                      import urllib.request as _req
-                      import json as _json
-                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=i&c=h&c=j&max_length=28", headers={"User-Agent": "Mozilla/5.0"})
-                      with _req.urlopen(r, timeout=5) as resp:
-                          d = _json.loads(resp.read().decode("utf-8"))
-                          h = d.get("hitokoto", "").strip()
-                          auth = d.get("from_who") or d.get("from")
-                          return f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
-                  except Exception:
-                      return "去热爱生活，去奔赴山海。"
+                      r = _req.Request("https://api.vvhan.com/api/ian/rand?type=json", headers=headers)
+                      with _req.urlopen(r, timeout=timeout) as resp:
+                          data = _json.loads(resp.read().decode("utf-8"))
+                          text = (data.get("data", {}).get("content") or data.get("content") or "").strip()
+                          if text:
+                              print(f"[QuoteFetcher] 命中优先级 1: 韩小韩 API -> {text}", flush=True)
+                              return text
+                  except Exception as e:
+                      print(f"[QuoteFetcher] 优先级 1 韩小韩 API 超时/异常 ({type(e).__name__})，切换优先级 2", flush=True)
+
+                  # 2. 其次调用：TenAPI 每日一言
+                  try:
+                      r = _req.Request("https://tenapi.cn/v2/yiyan", headers=headers)
+                      with _req.urlopen(r, timeout=timeout) as resp:
+                          data = _json.loads(resp.read().decode("utf-8"))
+                          text = (data.get("data", {}).get("content") or data.get("content") or "").strip()
+                          if text:
+                              print(f"[QuoteFetcher] 命中优先级 2: TenAPI -> {text}", flush=True)
+                              return text
+                  except Exception as e:
+                      print(f"[QuoteFetcher] 优先级 2 TenAPI 超时/异常 ({type(e).__name__})，切换优先级 3", flush=True)
+
+                  # 3. 再次调用：一言（Hitokoto）
+                  try:
+                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=i&c=k&c=h&c=j&max_length=28", headers=headers)
+                      with _req.urlopen(r, timeout=timeout) as resp:
+                          data = _json.loads(resp.read().decode("utf-8"))
+                          h = data.get("hitokoto", "").strip()
+                          auth = data.get("from_who") or data.get("from")
+                          text = f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
+                          if text:
+                              print(f"[QuoteFetcher] 命中优先级 3: Hitokoto 一言 -> {text}", flush=True)
+                              return text
+                  except Exception as e:
+                      print(f"[QuoteFetcher] 优先级 3 Hitokoto 超时/异常 ({type(e).__name__})，切换优先级 4", flush=True)
+
+                  # 4. 最后调用：金山词霸·每日一句
+                  try:
+                      r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
+                      with _req.urlopen(r, timeout=timeout) as resp:
+                          data = _json.loads(resp.read().decode("utf-8"))
+                          zh = data.get("note", "").strip()
+                          en = data.get("content", "").strip()
+                          text = f"{en}（{zh}）" if (en and zh and len(en) + len(zh) < 45) else (zh or en)
+                          if text:
+                              print(f"[QuoteFetcher] 命中优先级 4: 金山词霸 -> {text}", flush=True)
+                              return text
+                  except Exception as e:
+                      print(f"[QuoteFetcher] 优先级 4 金山词霸超时/异常 ({type(e).__name__})，启动本地精选词库", flush=True)
+
+                  fallback_pool = [
+                      "去热爱生活，去奔赴山海。",
+                      "愿你历尽千帆，归来仍是少年。",
+                      "星光不问赶路人，岁月不负有心人。",
+                      "山高水长，江湖莫忘。",
+                      "日落尤其温柔，人间皆是浪漫。",
+                      "知足且上进，温柔且坚定。",
+                      "春来夏往，秋收冬藏，我们来日方长。",
+                      "满怀希望，就会所向披靡。"
+                  ]
+                  fb = random.choice(fallback_pool)
+                  print(f"[QuoteFetcher] 命中本地精选词库 -> {fb}", flush=True)
+                  return fb
 
               _orig_send_message = _sender.send_message
 
               async def _patched_send_message(page, chat, message, stickers):
                   if message.type == "text" and message.content:
                       val = message.content
-                      if "[API]" in val or "[一言]" in val or val == "一言":
-                          q = _fetch_hitokoto()
-                          val = val.replace("[API]", q).replace("[一言]", q) if ("[API]" in val or "[一言]" in val) else q
+                      if "[API]" in val or "[一言]" in val or val == "一言" or "[金句]" in val:
+                          q = _fetch_quote()
+                          val = val.replace("[API]", q).replace("[一言]", q).replace("[金句]", q) if ("[API]" in val or "[一言]" in val or "[金句]" in val) else q
                           message = type(message)(type="text", content=val)
-                          print(f"[HumanizeHook] 动态解析一言内容: {val}", flush=True)
+                          print(f"[HumanizeHook] 动态解析金句内容: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
@@ -253,7 +321,7 @@ jobs:
 
               _sender.send_message = _patched_send_message
               _sender.send_text = _patched_send_text
-              print("[HumanizeHook] 已无侵入挂载一言动态文本与拟人化慢速打字防风控逻辑", flush=True)
+              print("[HumanizeHook] 已无侵入挂载多源金句与拟人化慢速打字防风控逻辑", flush=True)
 
           _install_playwright_proxy_hook()
           _install_humanized_sender_hook()
