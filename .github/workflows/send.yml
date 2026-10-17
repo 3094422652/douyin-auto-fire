@@ -229,7 +229,7 @@ jobs:
 
                   # 1. P1: Hitokoto (modern categories: d, e, h, j, k)
                   try:
-                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=e&c=h&c=j&c=k&max_length=28", headers=headers)
+                      r = _req.Request("https://v1.hitokoto.cn/?c=a&c=b&c=d&c=e&c=f&c=g&c=k&c=l&max_length=28", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           h = _clean_text(data.get("hitokoto", ""))
