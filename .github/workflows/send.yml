@@ -151,13 +151,13 @@ jobs:
         run: |
           set -e
           HOOK_DIR="/tmp/pw_proxy_hook"
-          mkdir -p "$HOOK_DIR"
-
-          cat << 'EOF' > "$HOOK_DIR/sitecustomize.py"
+          mkdir -p "$HOOK_DIR"cat << 'EOF' > "$HOOK_DIR/sitecustomize.py"
+          # -*- coding: utf-8 -*-
           import os
           import sys
           import asyncio
           import random
+          import re
 
           def _install_playwright_proxy_hook():
               proxy_url = os.environ.get("LOCAL_XRAY_PROXY", "socks5://127.0.0.1:10808").strip()
@@ -201,20 +201,27 @@ jobs:
               except ImportError:
                   return
 
+              def _clean_text(s):
+                  if not s:
+                      return ""
+                  s = re.sub(r'[
+	]+', ' ', s).strip()
+                  return s
+
               def _fetch_quote():
                   import urllib.request as _req
                   import json as _json
 
                   timeout = 2.5
-                  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-                  # 1. 第一优先：一言 (Hitokoto 纯现代治愈 / 影视台词 / 网易云热评，排除古诗词)
+                  # 1. 第一优先：一言 (Hitokoto 纯现代治愈 / 影视台词 / 网易云热评 / 哲学，彻底剔除古诗词 c=i)
                   try:
                       r = _req.Request("https://v1.hitokoto.cn/?c=d&c=e&c=h&c=j&c=k&max_length=28", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
-                          h = data.get("hitokoto", "").strip()
-                          auth = data.get("from_who") or data.get("from")
+                          h = _clean_text(data.get("hitokoto", ""))
+                          auth = _clean_text(data.get("from_who") or data.get("from") or "")
                           text = f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
                           if text:
                               print(f"[QuoteFetcher] 命中优先级 1: 一言·现代治愈 -> {text}", flush=True)
@@ -222,43 +229,53 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] 优先级 1 一言异常 ({type(e).__name__})，切换优先级 2", flush=True)
 
-                  # 2. 第二优先：xygeng 壹思 API (现代生活哲学与情感励志金句)
+                  # 2. 第二优先：xygeng 壹思 API (现代生活随笔与哲思金句)
                   try:
                       r = _req.Request("https://api.xygeng.cn/one", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
-                          text = (data.get("data", {}).get("content") or "").strip()
+                          raw = data.get("data", {}).get("content") or ""
+                          text = _clean_text(raw)
+                          # 若文本过长或包含多句，截取首个完整分句保持精悍优雅
+                          if len(text) > 36:
+                              split_pts = [m.end() for m in re.finditer(r'[。！？!?]', text)]
+                              valid_splits = [p for p in split_pts if 10 <= p <= 36]
+                              if valid_splits:
+                                  text = text[:valid_splits[0]]
+                              else:
+                                  text = text[:32] + "..."
                           if text:
                               print(f"[QuoteFetcher] 命中优先级 2: xygeng 壹思 API -> {text}", flush=True)
                               return text
                   except Exception as e:
                       print(f"[QuoteFetcher] 优先级 2 xygeng 壹思异常 ({type(e).__name__})，切换优先级 3", flush=True)
 
-                  # 3. 第三优先：每日暖心短句 API (SweetNothings 温情日常短句)
+                  # 3. 第三优先：每日暖心短句 API (SweetNothings 日常温情治愈短句)
                   try:
                       r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
-                          text = resp.read().decode("utf-8").strip()
+                          text = _clean_text(resp.read().decode("utf-8"))
                           if text:
                               print(f"[QuoteFetcher] 命中优先级 3: 每日暖心短句 -> {text}", flush=True)
                               return text
                   except Exception as e:
                       print(f"[QuoteFetcher] 优先级 3 每日暖心短句异常 ({type(e).__name__})，切换优先级 4", flush=True)
 
-                  # 4. 第四优先：金山词霸·每日一句 (现代名言/电影台词地道中文译文)
+                  # 4. 第四优先：金山词霸·每日一句 (经典名言地道中文译文)
                   try:
                       r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
-                          zh = data.get("note", "").strip()
-                          en = data.get("content", "").strip()
+                          zh = _clean_text(data.get("note", ""))
+                          en = _clean_text(data.get("content", ""))
                           text = f"{en}（{zh}）" if (en and zh and len(en) + len(zh) < 45) else (zh or en)
                           if text:
                               print(f"[QuoteFetcher] 命中优先级 4: 金山词霸每日一句 -> {text}", flush=True)
                               return text
                   except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 4 金山词霸异常 ({type(e).__name__})，启动本地精选现代词库", flush=True)
+                      print(f"[QuoteFetcher] 优先级 4 金山词霸异常 ({type(e).__name__})，启动本地精选纯现代词库", flush=True)
 
+                  # 5. 底线离线兜底：8 条精选纯现代温柔励志短句
                   fallback_pool = [
                       "去热爱生活，去奔赴山海。",
                       "愿你历尽千帆，归来仍是少年。",
@@ -278,20 +295,26 @@ jobs:
               async def _patched_send_message(page, chat, message, stickers):
                   if message.type == "text" and message.content:
                       val = message.content
+                      # 支持关键字触发：[API]、[一言]、[金句] 或配置文本完全等于 "一言"
                       if "[API]" in val or "[一言]" in val or val == "一言" or "[金句]" in val:
                           q = _fetch_quote()
-                          val = val.replace("[API]", q).replace("[一言]", q).replace("[金句]", q) if ("[API]" in val or "[一言]" in val or "[金句]" in val) else q
+                          if "[API]" in val or "[一言]" in val or "[金句]" in val:
+                              val = val.replace("[API]", q).replace("[一言]", q).replace("[金句]", q)
+                          else:
+                              val = q
+                          val = _clean_text(val)
                           message = type(message)(type="text", content=val)
                           print(f"[HumanizeHook] 动态解析金句内容: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
+                  content = _clean_text(content)
                   editor = await chat.message_input()
                   page = editor.page
                   await editor.click()
                   await asyncio.sleep(random.uniform(0.6, 1.2))
 
-                  # 拟真打字节奏输入
+                  # 拟真打字节奏输入，杜绝瞬间粘贴与回车换行断句异常
                   for char in content:
                       await page.keyboard.type(char)
                       if char in "，。！？；、,.!?":
