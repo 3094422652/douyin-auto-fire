@@ -154,226 +154,226 @@ jobs:
           HOOK_DIR="/tmp/pw_proxy_hook"
           mkdir -p "$HOOK_DIR"
 
-          cat << 'EOF' > "$HOOK_DIR/sitecustomize.py"
-          # -*- coding: utf-8 -*-
-          import os
-          import sys
-          import asyncio
-          import random
-          import re
+cat << 'EOF' > "$HOOK_DIR/sitecustomize.py"
+import os
+import sys
+import asyncio
+import random
+import re
 
-          def _install_playwright_proxy_hook():
-              proxy_url = os.environ.get("LOCAL_XRAY_PROXY", "socks5://127.0.0.1:10808").strip()
-              if not proxy_url:
-                  return
-              try:
-                  import playwright._impl._browser_type as _bt
-              except ImportError:
-                  return
+def _install_playwright_proxy_hook():
+    proxy_url = os.environ.get("LOCAL_XRAY_PROXY", "socks5://127.0.0.1:10808").strip()
+    if not proxy_url:
+        return
+    try:
+        import playwright._impl._browser_type as _bt
+    except ImportError:
+        return
 
-              _orig_launch = _bt.BrowserType.launch
-              _orig_launch_persistent = _bt.BrowserType.launch_persistent_context
+    _orig_launch = _bt.BrowserType.launch
+    _orig_launch_persistent = _bt.BrowserType.launch_persistent_context
 
-              async def _patched_launch(self, *args, **kwargs):
-                  if not kwargs.get("proxy"):
-                      kwargs["proxy"] = {"server": proxy_url}
-                      print(f"[ProxyHook] BrowserType.launch 已强制绑定本地 Xray 隧道: {proxy_url}", flush=True)
-                  kwargs["args"] = list(kwargs.get("args") or [])
-                  if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
-                      kwargs["args"].append("--disable-blink-features=AutomationControlled")
-                  return await _orig_launch(self, *args, **kwargs)
+    async def _patched_launch(self, *args, **kwargs):
+        if not kwargs.get("proxy"):
+            kwargs["proxy"] = {"server": proxy_url}
+            print(f"[ProxyHook] BrowserType.launch -> {proxy_url}", flush=True)
+        kwargs["args"] = list(kwargs.get("args") or [])
+        if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
+            kwargs["args"].append("--disable-blink-features=AutomationControlled")
+        return await _orig_launch(self, *args, **kwargs)
 
-              async def _patched_launch_persistent(self, *args, **kwargs):
-                  if not kwargs.get("proxy"):
-                      kwargs["proxy"] = {"server": proxy_url}
-                      print(f"[ProxyHook] BrowserType.launch_persistent_context 已强制绑定本地 Xray 隧道: {proxy_url}", flush=True)
-                  kwargs["args"] = list(kwargs.get("args") or [])
-                  if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
-                      kwargs["args"].append("--disable-blink-features=AutomationControlled")
-                  return await _orig_launch_persistent(self, *args, **kwargs)
+    async def _patched_launch_persistent(self, *args, **kwargs):
+        if not kwargs.get("proxy"):
+            kwargs["proxy"] = {"server": proxy_url}
+            print(f"[ProxyHook] BrowserType.launch_persistent_context -> {proxy_url}", flush=True)
+        kwargs["args"] = list(kwargs.get("args") or [])
+        if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
+            kwargs["args"].append("--disable-blink-features=AutomationControlled")
+        return await _orig_launch_persistent(self, *args, **kwargs)
 
-              _bt.BrowserType.launch = _patched_launch
-              _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
+    _bt.BrowserType.launch = _patched_launch
+    _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
 
-              try:
-                  import playwright._impl._browser as _b
-                  _orig_new_context = _b.Browser.new_context
+    try:
+        import playwright._impl._browser as _b
+        _orig_new_context = _b.Browser.new_context
 
-                  async def _patched_new_context(self, *args, **kwargs):
-                      if "timezone_id" not in kwargs or not kwargs["timezone_id"]:
-                          kwargs["timezone_id"] = "Asia/Shanghai"
-                      return await _orig_new_context(self, *args, **kwargs)
+        async def _patched_new_context(self, *args, **kwargs):
+            if "timezone_id" not in kwargs or not kwargs["timezone_id"]:
+                kwargs["timezone_id"] = "Asia/Shanghai"
+            return await _orig_new_context(self, *args, **kwargs)
 
-                  _b.Browser.new_context = _patched_new_context
-              except Exception:
-                  pass
+        _b.Browser.new_context = _patched_new_context
+    except Exception:
+        pass
 
-          def _install_humanized_sender_hook():
-              try:
-                  import app.sender as _sender
-                  from app.douyin import PageOperationError
-              except ImportError:
-                  return
+def _install_humanized_sender_hook():
+    try:
+        import app.sender as _sender
+        from app.douyin import PageOperationError
+    except ImportError:
+        return
 
-              def _clean_text(s):
-                  if not s:
-                      return ""
-                  s = re.sub(r"[\r\n\t]+", " ", s).strip()
-                  return s
+    def _clean_text(s):
+        if not s:
+            return ""
+        s = re.sub(r"[\r\n\t]+", " ", s).strip()
+        for ch in ("\u201c", "\u201d", "\"", "\u300c", "\u300d", "\u300e", "\u300f"):
+            s = s.strip(ch)
+        return s.strip()
 
-              def _fetch_quote():
-                  import urllib.request as _req
-                  import json as _json
+    def _fetch_quote():
+        import urllib.request as _req
+        import json as _json
 
-                  timeout = 2.5
-                  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        timeout = 2.5
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-                  # 1. 第一优先：一言 (Hitokoto 纯现代治愈 / 影视台词 / 网易云热评 / 哲学，彻底剔除古诗词 c=i)
-                  try:
-                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=e&c=h&c=j&c=k&max_length=28", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          h = _clean_text(data.get("hitokoto", "")).strip('“”"'「」')
-                          auth = _clean_text(data.get("from_who") or data.get("from") or "")
-                          if auth in ("null", "None", ""):
-                              auth = ""
-                          if auth and h.endswith(("。", "！", "!", ".")):
-                              h = h.rstrip("。！!.")
-                          text = f"{h} —— {auth}" if (auth and len(h) + len(auth) < 30) else h
-                          if text:
-                              print(f"[QuoteFetcher] 命中优先级 1: 一言·现代治愈 -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 1 一言异常 ({type(e).__name__})，切换优先级 2", flush=True)
+        # 1. P1: Hitokoto (modern categories: d, e, h, j, k)
+        try:
+            r = _req.Request("https://v1.hitokoto.cn/?c=d&c=e&c=h&c=j&c=k&max_length=28", headers=headers)
+            with _req.urlopen(r, timeout=timeout) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+                h = _clean_text(data.get("hitokoto", ""))
+                auth = _clean_text(data.get("from_who") or data.get("from") or "")
+                if auth in ("null", "None", ""):
+                    auth = ""
+                if auth:
+                    for ch in ("\u3002", "\uff01", "!", "."):
+                        if h.endswith(ch):
+                            h = h[:-1]
+                text = f"{h} \u2014\u2014 {auth}" if (auth and len(h) + len(auth) < 30) else h
+                if text:
+                    print(f"[QuoteFetcher] Hitokoto -> {text}", flush=True)
+                    return text
+        except Exception as e:
+            print(f"[QuoteFetcher] Hitokoto err ({type(e).__name__}), fallback to P2", flush=True)
 
-                  # 2. 第二优先：xygeng 壹思 API (现代生活随笔与哲思金句)
-                  try:
-                      r = _req.Request("https://api.xygeng.cn/one", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          d = data.get("data")
-                          raw = (d.get("content") if isinstance(d, dict) else "") or ""
-                          text = _clean_text(raw)
-                          # 若文本过长或包含多句，截取首个完整分句保持精悍优雅
-                          if len(text) > 36:
-                              split_pts = [m.end() for m in re.finditer(r'[。！？!?]', text)]
-                              valid_splits = [p for p in split_pts if 10 <= p <= 36]
-                              if valid_splits:
-                                  text = text[:valid_splits[0]]
-                              else:
-                                  text = text[:32] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] 命中优先级 2: xygeng 壹思 API -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 2 xygeng 壹思异常 ({type(e).__name__})，切换优先级 3", flush=True)
+        # 2. P2: xygeng API
+        try:
+            r = _req.Request("https://api.xygeng.cn/one", headers=headers)
+            with _req.urlopen(r, timeout=timeout) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+                d = data.get("data")
+                raw = (d.get("content") if isinstance(d, dict) else "") or ""
+                text = _clean_text(raw)
+                if len(text) > 36:
+                    split_pts = [m.end() for m in re.finditer(r'[\u3002\uff01\uff1f!?]', text)]
+                    valid_splits = [p for p in split_pts if 10 <= p <= 36]
+                    if valid_splits:
+                        text = text[:valid_splits[0]]
+                    else:
+                        text = text[:32] + "..."
+                if text:
+                    print(f"[QuoteFetcher] xygeng -> {text}", flush=True)
+                    return text
+        except Exception as e:
+            print(f"[QuoteFetcher] xygeng err ({type(e).__name__}), fallback to P3", flush=True)
 
-                  # 3. 第三优先：每日暖心短句 API (SweetNothings 日常温情治愈短句)
-                  try:
-                      r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          text = _clean_text(resp.read().decode("utf-8"))
-                          if text:
-                              print(f"[QuoteFetcher] 命中优先级 3: 每日暖心短句 -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 3 每日暖心短句异常 ({type(e).__name__})，切换优先级 4", flush=True)
+        # 3. P3: SweetNothings
+        try:
+            r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
+            with _req.urlopen(r, timeout=timeout) as resp:
+                text = _clean_text(resp.read().decode("utf-8"))
+                if text:
+                    print(f"[QuoteFetcher] SweetNothings -> {text}", flush=True)
+                    return text
+        except Exception as e:
+            print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P4", flush=True)
 
-                  # 4. 第四优先：金山词霸·每日一句 (经典名言地道中文译文)
-                  try:
-                      r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          zh = _clean_text(data.get("note", ""))
-                          en = _clean_text(data.get("content", ""))
-                          text = f"{en}（{zh}）" if (en and zh and len(en) + len(zh) < 45) else (zh or en)
-                          if text:
-                              print(f"[QuoteFetcher] 命中优先级 4: 金山词霸每日一句 -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] 优先级 4 金山词霸异常 ({type(e).__name__})，启动本地精选纯现代词库", flush=True)
+        # 4. P4: Iciba
+        try:
+            r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
+            with _req.urlopen(r, timeout=timeout) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+                zh = _clean_text(data.get("note", ""))
+                en = _clean_text(data.get("content", ""))
+                text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) < 45) else (zh or en)
+                if text:
+                    print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
+                    return text
+        except Exception as e:
+            print(f"[QuoteFetcher] Iciba err ({type(e).__name__}), fallback to local pool", flush=True)
 
-                  # 5. 底线离线兜底：8 条精选纯现代温柔励志短句
-                  fallback_pool = [
-                      "去热爱生活，去奔赴山海。",
-                      "愿你历尽千帆，归来仍是少年。",
-                      "生活原本沉闷，但跑起来就有风。",
-                      "日落尤其温柔，人间皆是浪漫。",
-                      "知足且上进，温柔且坚定。",
-                      "春来夏往，秋收冬藏，我们来日方长。",
-                      "满怀希望，就会所向披靡。",
-                      "生活明朗，万物可爱，人间值得，未来可期。",
-                      "保持热爱，奔赴下一场山海。",
-                      "把细碎的日子过成诗，简单且温暖。",
-                      "追光的人，终会万丈光芒。",
-                      "心有繁花，一路生香。"
-                  ]
-                  fb = random.choice(fallback_pool)
-                  print(f"[QuoteFetcher] 命中本地精选纯现代词库 -> {fb}", flush=True)
-                  return fb
+        # 5. Offline Fallback Pool
+        fallback_pool = [
+            "\u53bb\u70ed\u7231\u751f\u6d3b\uff0c\u53bb\u5954\u8d74\u5c71\u6d77\u3002",
+            "\u613f\u4f60\u5386\u5c3d\u5343\u5e06\uff0c\u5f52\u6765\u4edd\u662f\u5c11\u5e74\u3002",
+            "\u751f\u6d3b\u539f\u672c\u6c89\u95f7\uff0c\u4f46\u8dd1\u8d77\u6765\u5c31\u6709\u98ce\u3002",
+            "\u65e5\u843d\u5c24\u5176\u6e29\u67d4\uff0c\u4eba\u95f4\u7686\u662f\u6d6a\u6f2b\u3002",
+            "\u77e5\u8db3\u4e14\u4e0a\u8fdb\uff0c\u6e29\u67d4\u4e14\u575a\u5b9a\u3002",
+            "\u6625\u6765\u580f\u5f80\uff0c\u79cb\u6536\u51ac\u85cf\uff0c\u6211\u4eec\u6765\u65e5\u65b9\u957f\u3002",
+            "\u6ee1\u6000\u5e0c\u671b\uff0c\u5c31\u4f1a\u6240\u5411\u62ab\u9761\u3002",
+            "\u751f\u6d3b\u660e\u6717\uff0c\u4e07\u7269\u53ef\u7231\uff0c\u4eba\u95f4\u503c\u5f97\uff0c\u672a\u6765\u53ef\u671f\u3002",
+            "\u4fdd\u6301\u70ed\u7231\uff0c\u5954\u8d74\u4e0b\u4e00\u573a\u5c71\u6d77\u3002",
+            "\u628a\u7ec6\u788e\u7684\u65e5\u5b50\u8fc7\u6210\u8bd7\uff0c\u7b80\u5355\u4e14\u6e29\u6696\u3002",
+            "\u8ffd\u5149\u7684\u4eba\uff0c\u7ec8\u4f1a\u4e07\u4e08\u5149\u8292\u3002",
+            "\u5fc3\u6709\u7e41\u82b1\uff0c\u4e00\u8def\u751f\u9999\u3002"
+        ]
+        fb = random.choice(fallback_pool)
+        print(f"[QuoteFetcher] fallback -> {fb}", flush=True)
+        return fb
 
-              _orig_send_message = _sender.send_message
+    _orig_send_message = _sender.send_message
 
-              async def _patched_send_message(page, chat, message, stickers):
-                  if message.type == "text" and message.content:
-                      val = message.content
-                      # 支持关键字触发：[API]、[一言]、[金句]、[每日一句] 或配置文本完全等于 "一言" / "金句" / "每日一句"
-                      v_stripped = val.strip()
-                      triggers = ("[API]", "[一言]", "[金句]", "[每日一句]")
-                      exact_matches = ("一言", "金句", "每日一句", "API", "api")
-                      if any(t in val for t in triggers) or v_stripped in exact_matches:
-                          q = _fetch_quote()
-                          if any(t in val for t in triggers):
-                              for t in triggers:
-                                  val = val.replace(t, q)
-                          else:
-                              val = q
-                          val = _clean_text(val)
-                          message = type(message)(type="text", content=val)
-                          print(f"[HumanizeHook] 动态解析金句内容: {val}", flush=True)
-                  return await _orig_send_message(page, chat, message, stickers)
+    async def _patched_send_message(page, chat, message, stickers):
+        if message.type == "text" and message.content:
+            val = message.content
+            v_stripped = val.strip()
+            triggers = ("[API]", "\u4e00\u8a00", "[\u4e00\u8a00]", "[\u91d1\u53e5]", "[\u6bcf\u65e5\u4e00\u53e5]")
+            exact_matches = ("\u4e00\u8a00", "\u91d1\u53e5", "\u6bcf\u65e5\u4e00\u53e5", "API", "api")
+            if any(t in val for t in triggers) or v_stripped in exact_matches:
+                q = _fetch_quote()
+                if any(t in val for t in triggers):
+                    for t in triggers:
+                        val = val.replace(t, q)
+                else:
+                    val = q
+                val = _clean_text(val)
+                message = type(message)(type="text", content=val)
+                print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
+        return await _orig_send_message(page, chat, message, stickers)
 
-              async def _patched_send_text(chat, content):
-                  content = _clean_text(content)
-                  editor = await chat.message_input()
-                  page = editor.page
-                  await editor.click()
-                  await asyncio.sleep(random.uniform(0.6, 1.2))
+    async def _patched_send_text(chat, content):
+        content = _clean_text(content)
+        editor = await chat.message_input()
+        page = editor.page
+        await editor.click()
+        await asyncio.sleep(random.uniform(0.6, 1.2))
 
-                  # 拟真打字节奏输入，使用 insert_text 确保跨平台 CJK / 表情符号绝对兼容
-                  for char in content:
-                      await page.keyboard.insert_text(char)
-                      if char in "，。！？；、,.!?":
-                          await asyncio.sleep(random.uniform(0.35, 0.55))
-                      else:
-                          await asyncio.sleep(random.uniform(0.12, 0.25))
+        for char in content:
+            await page.keyboard.insert_text(char)
+            if char in "\uff0c\u3002\uff01\uff1f\uff1b\u3001,.!?":
+                await asyncio.sleep(random.uniform(0.35, 0.55))
+            else:
+                await asyncio.sleep(random.uniform(0.12, 0.25))
 
-                  try:
-                      await page.wait_for_function(
-                          """([txt]) => {
-                              const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
-                              return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(txt.replace(/\s+/g, ' ')));
-                          }""",
-                          arg=[content],
-                          timeout=5000,
-                      )
-                  except Exception as exc:
-                      raise PageOperationError("输入未写入编辑框") from exc
+        try:
+            await page.wait_for_function(
+                """([txt]) => {
+                    const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
+                    return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(txt.replace(/\s+/g, ' ')));
+                }""",
+                arg=[content],
+                timeout=5000,
+            )
+        except Exception as exc:
+            raise PageOperationError("Input not verified in editor") from exc
 
-                  await asyncio.sleep(random.uniform(1.0, 1.8))
+        await asyncio.sleep(random.uniform(1.0, 1.8))
 
-                  before = await _sender._mark_latest_outgoing_message(page)
-                  await page.wait_for_timeout(300)
-                  await _sender._trigger_send(page)
-                  await _sender._confirm_outgoing_message(page, before, label="文本", expected_text=content)
+        before = await _sender._mark_latest_outgoing_message(page)
+        await page.wait_for_timeout(300)
+        await _sender._trigger_send(page)
+        await _sender._confirm_outgoing_message(page, before, label="text", expected_text=content)
 
-              _sender.send_message = _patched_send_message
-              _sender.send_text = _patched_send_text
-              print("[HumanizeHook] 已无侵入挂载纯现代多源金句与拟人化慢速打字防风控逻辑", flush=True)
+    _sender.send_message = _patched_send_message
+    _sender.send_text = _patched_send_text
+    print("[HumanizeHook] Mounted humanized sender hook successfully", flush=True)
 
-          _install_playwright_proxy_hook()
-          _install_humanized_sender_hook()
-          EOF
+_install_playwright_proxy_hook()
+_install_humanized_sender_hook()
+EOF
 
           echo "PYTHONPATH=${HOOK_DIR}:${PYTHONPATH}" >> "$GITHUB_ENV"
           echo "LOCAL_XRAY_PROXY=socks5://127.0.0.1:10808" >> "$GITHUB_ENV"
