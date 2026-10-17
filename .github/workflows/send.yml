@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "1 16 * * *"
+    - cron: "26 16 * * *"
 
 # 顶层权限显式置空（最小权限原则，防 GITHUB_TOKEN 默认写权限滥用）
 permissions: {}
@@ -402,11 +402,11 @@ jobs:
           fi
           echo "sitecustomize.py 零侵入代理与拟人化钩子注入完成！"
 
-      - name: Randomized execution jitter (00:01 - 00:03)
+      - name: Randomized execution jitter (00:26 - 00:28)
         if: github.event_name == 'schedule'
         shell: bash
         run: |
-          # 仅在每天定时触发时执行，随机等待 0 ~ 120 秒（在 00:01 到 00:03 之间随机拟人化执行）
+          # 仅在每天定时触发时执行，随机等待 0 ~ 120 秒（在 00:26 到 00:28 之间随机拟人化执行）
           JITTER_SEC=$(( RANDOM % 121 ))
           echo "拟人化随机延时防风控：本次任务随机延后 ${JITTER_SEC} 秒后启动浏览器..."
           sleep "$JITTER_SEC"
