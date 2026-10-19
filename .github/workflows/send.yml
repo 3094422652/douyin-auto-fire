@@ -193,8 +193,8 @@ jobs:
                   if proxy_url and not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch_persistent_context -> {proxy_url}", flush=True)
-                  if not kwargs.get("timezone_id"):
-                      kwargs["timezone_id"] = "Asia/Shanghai"
+                  if "timezoneId" not in kwargs:
+                      kwargs["timezoneId"] = "Asia/Shanghai"
                       print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
                   kwargs["args"] = list(kwargs.get("args") or [])
                   if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
@@ -202,8 +202,8 @@ jobs:
                   return await _orig_launch_persistent(self, *args, **kwargs)
 
               async def _patched_new_context(self, *args, **kwargs):
-                  if not kwargs.get("timezone_id"):
-                      kwargs["timezone_id"] = "Asia/Shanghai"
+                  if "timezoneId" not in kwargs:
+                      kwargs["timezoneId"] = "Asia/Shanghai"
                       print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
                   return await _orig_new_context(self, *args, **kwargs)
 
