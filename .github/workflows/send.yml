@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "50 23 * * *"
 
 # 顶层权限显式置空（最小权限原则，防 GITHUB_TOKEN 默认写权限滥用）
 permissions: {}
@@ -46,6 +46,12 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
 
       - name: Install Playwright browsers
         run: python -m playwright install --with-deps chromium
@@ -164,18 +170,18 @@ jobs:
 
           def _install_playwright_proxy_hook():
               proxy_url = os.environ.get("LOCAL_XRAY_PROXY", "socks5://127.0.0.1:10808").strip()
-              if not proxy_url:
-                  return
               try:
                   import playwright._impl._browser_type as _bt
+                  import playwright._impl._browser as _br
               except ImportError:
                   return
 
               _orig_launch = _bt.BrowserType.launch
               _orig_launch_persistent = _bt.BrowserType.launch_persistent_context
+              _orig_new_context = _br.Browser.new_context
 
               async def _patched_launch(self, *args, **kwargs):
-                  if not kwargs.get("proxy"):
+                  if proxy_url and not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch -> {proxy_url}", flush=True)
                   kwargs["args"] = list(kwargs.get("args") or [])
@@ -184,16 +190,26 @@ jobs:
                   return await _orig_launch(self, *args, **kwargs)
 
               async def _patched_launch_persistent(self, *args, **kwargs):
-                  if not kwargs.get("proxy"):
+                  if proxy_url and not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch_persistent_context -> {proxy_url}", flush=True)
+                  if not kwargs.get("timezone_id"):
+                      kwargs["timezone_id"] = "Asia/Shanghai"
+                      print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
                   kwargs["args"] = list(kwargs.get("args") or [])
                   if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
                       kwargs["args"].append("--disable-blink-features=AutomationControlled")
                   return await _orig_launch_persistent(self, *args, **kwargs)
 
+              async def _patched_new_context(self, *args, **kwargs):
+                  if not kwargs.get("timezone_id"):
+                      kwargs["timezone_id"] = "Asia/Shanghai"
+                      print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
+                  return await _orig_new_context(self, *args, **kwargs)
+
               _bt.BrowserType.launch = _patched_launch
               _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
+              _br.Browser.new_context = _patched_new_context
 
           def _install_humanized_sender_hook():
               try:
@@ -402,11 +418,11 @@ jobs:
           fi
           echo "sitecustomize.py 零侵入代理与拟人化钩子注入完成！"
 
-      - name: Randomized execution jitter (08:00 - 08:02)
+      - name: Randomized execution jitter (07:50 - 07:52)
         if: github.event_name == 'schedule'
         shell: bash
         run: |
-          # 仅在每天定时触发时执行，随机等待 0 ~ 120 秒（在 08:00 到 08:02 之间随机拟人化执行）
+          # 仅在每天定时触发时执行，随机等待 0 ~ 120 秒（在 07:50 到 07:52 之间随机拟人化执行）
           JITTER_SEC=$(( RANDOM % 121 ))
           echo "拟人化随机延时防风控：本次任务随机延后 ${JITTER_SEC} 秒后启动浏览器..."
           sleep "$JITTER_SEC"
@@ -422,6 +438,11 @@ jobs:
           else
             python run.py
           fi
+
+      - name: Stop Xray Proxy Tunnel
+        if: always()
+        run: |
+          pkill -f "/tmp/xray/xray" || true
 
       - name: Encrypt diagnostics artifacts (7-Zip AES-256)
         if: failure()
