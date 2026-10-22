@@ -245,101 +245,95 @@ jobs:
               def _fetch_quote():
                   import urllib.request as _req
                   import json as _json
+                  import datetime
 
-                  timeout = 2.5
+                  timeout = 2.0
                   headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-                  # 1. P1: Hitokoto (categories: a, b, d, e, f, g, k, l, max_length=100)
-                  try:
-                      r = _req.Request("https://v1.hitokoto.cn/?c=a&c=b&c=d&c=e&c=f&c=g&c=k&c=l&max_length=100", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          h = _clean_text(data.get("hitokoto", ""))
-                          auth = _clean_text(_format_author(data.get("from_who"), data.get("from")))
-                          if auth:
-                              for ch in ("\u3002", "\uff01", "!", "."):
-                                  if h.endswith(ch):
-                                      h = h[:-1]
-                              text = f"{h} \u2014\u2014 {auth}"
-                          else:
-                              text = h
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] Hitokoto -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] Hitokoto err ({type(e).__name__}), fallback to P2", flush=True)
+                  bad_keywords = (
+                      "正弦", "余弦", "几何", "君不见", "噫吁嚱", "哉", "妾", "寡人", "贫僧", "阁下", "卿",
+                      "海贼王", "火影", "死神", "银魂", "柯南", "进击的巨人", "动漫", "二次元", "新海诚", "宫崎骏", "EVA", "JOJO", "宝可梦", "路飞", "索隆", "山治", "鸣人", "佐助", "游戏", "英雄联盟", "王者荣耀", "原神", "高达", "龙珠", "奥特曼",
+                      "死", "恨", "绝望", "毁灭", "孤独", "眼泪", "哭泣", "伤害", "背叛", "深渊", "地狱", "罪孽", "杀", "魔", "妖", "鬼"
+                  )
 
-                  # 2. P2: xygeng API (no artificial truncation under 100 chars)
-                  try:
-                      r = _req.Request("https://api.xygeng.cn/one", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          d = data.get("data")
-                          raw = (d.get("content") if isinstance(d, dict) else "") or ""
-                          text = _clean_text(raw)
-                          if isinstance(d, dict):
-                              auth = _clean_text(_format_author(d.get("name"), d.get("origin")))
-                              if auth:
-                                  for ch in ("\u3002", "\uff01", "!", "."):
-                                      if text.endswith(ch):
-                                          text = text[:-1]
-                                  text = f"{text} \u2014\u2014 {auth}"
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] xygeng -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] xygeng err ({type(e).__name__}), fallback to P3", flush=True)
+                  def _is_valid(t):
+                      if not t or len(t) < 6 or len(t) > 70:
+                          return False
+                      return not any(k in t for k in bad_keywords)
 
-                  # 3. P3: SweetNothings
-                  try:
-                      r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          text = _clean_text(resp.read().decode("utf-8"))
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] SweetNothings -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P4", flush=True)
+                  curated_pool = [
+                      "生活明朗，万物可爱，今天也要开开心心呀~",
+                      "愿生活常温暖，日子常温柔，今天也要顺顺利利哦。",
+                      "保持热爱，奔赴山海，每一天都充满惊喜与期待！",
+                      "生活原本沉闷，但跑起来就会有风。今天也要元气满满呀！",
+                      "把细碎的日子过成诗，简单且温暖。新的一天，加油！",
+                      "心有繁花，一路生香。祝你今天也是被好运包围的一天~",
+                      "愿所有的美好和幸运，都如约而至。新的一天，活力满满！",
+                      "知足且上进，温柔且坚定。早安，愿今天收获满满的美好！",
+                      "把快乐装进口袋，把烦恼丢在昨天。今天也要保持微笑哦~",
+                      "每一天都是新的开始，愿你的生活明媚灿烂，温暖有光。",
+                      "带着清晨的微风与阳光，祝你今天拥有超级棒的好心情！",
+                      "步履不停，生活向前。愿所有的努力与坚持，都能开出灿烂的花。",
+                      "慢品人间烟火色，闲观万事岁月长。愿你今天的日子温柔而惬意。",
+                      "生活虽平凡，但总有不期而遇的温暖和生生不息的希望。",
+                      "愿你今天元气满满，所遇皆温柔，所想皆成真！",
+                      "清晨微风吹过，送去满满的祝福：今天也要顺心如意、平安喜乐呀~",
+                      "努力成为自己喜欢的人，去热爱生活，去奔赴下一场山海。",
+                      "愿你的每一天，都满载着阳光与好心情，健康平安！",
+                      "生活的美好，在于每一个简单而真诚的日常。今天也要加油哦！",
+                      "日出有盼，日落有念。愿你这一天充实、自在、快乐。",
+                      "愿你眼里有光芒，身边有温暖，嘴角有微笑，心中有希望。",
+                      "今天也是充满希望的一天，愿一切美好都与你不期而遇！",
+                      "把好心情打包带走，把不开心统统清零。今天也要元气爆棚呀~",
+                      "追光的人，终会万丈光芒。今天也要充满信心地出发！",
+                      "平淡的日子里，藏着琐碎的浪漫。愿你今天拥有简单的幸福！",
+                      "愿你所行皆坦途，所遇皆良善，今天顺心顺意！",
+                      "迎着朝阳出发，把每一个平凡的日子过得热气腾腾！",
+                      "愿你保持向阳的姿态，眼里全是温柔与期待。",
+                      "去热爱，去生活，去体验这个世界所有美好的事物！",
+                      "愿你心里有一团火，眼里有一束光，把日子过得温暖而有力量。",
+                      "不慌不忙，温柔成长。愿你今天心情明朗，诸事顺遂！",
+                      "早呀！每一缕晨光都是新的馈赠，愿你拥有美好充实的一天。",
+                      "愿世间美好与你环环相扣，今天也要做个快乐的小可爱。",
+                      "心怀浪漫宇宙，也珍惜人间日常。祝你今天事事皆如意！",
+                      "向前走，天总会亮，生活总会充满阳光与希望。",
+                      "温柔待人，也被这世界温柔以待。早安，好运连连！",
+                      "阳光正好，微风不燥。愿你今天的每一刻都自在欢喜。",
+                      "眼里有星河，心中有繁花。今天也要元气满满向前奔跑！",
+                      "做自己的小太阳，无需凭借别人的光。愿你今天自信又美丽！",
+                      "让生活多一点微笑，让日子多一点甜。今天也要顺顺当当！"
+                  ]
 
-                  # 4. P4: Iciba (keep bilingual if en + zh <= 100 chars)
+                  # 智能周五与周末专属心语
+                  weekday = datetime.datetime.now().weekday()
+                  if weekday == 4:
+                      curated_pool.extend([
+                          "周五啦！坚持一下，马上就是美好的周末了，今天也要元气满满呀~",
+                          "周五愉快！愿你今天工作学习顺顺利利，迎接惬意的周末时光！",
+                          "美好的周五到了，把疲惫卸下，提前祝你周末愉快放松！"
+                      ])
+                  elif weekday in (5, 6):
+                      curated_pool.extend([
+                          "周末愉快！好好享受属于自己的悠闲时光，开开心心度过这两天~",
+                          "睡个好觉，吃顿美食，周末好好给自己充充电，愿你惬意自在！",
+                          "周末时光，愿你有茶有书，有阳光微风，尽情放松享受生活！"
+                      ])
+
+                  # 1. 尝试金山词霸每日双语治愈名句（中文部分）
                   try:
                       r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           zh = _clean_text(data.get("note", ""))
-                          en = _clean_text(data.get("content", ""))
-                          text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) + 2 <= 100) else (zh or en)
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] Iciba err ({type(e).__name__}), fallback to local pool", flush=True)
+                          if _is_valid(zh):
+                              print(f"[QuoteFetcher] Iciba -> {zh}", flush=True)
+                              return zh
+                  except Exception:
+                      pass
 
-                  # 5. Offline Fallback Pool with Author/Source
-                  fallback_pool = [
-                      "\u53bb\u70ed\u7231\u751f\u6d3b\uff0c\u53bb\u5954\u8d74\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4eba\u6c11\u65e5\u62a5\u300b",
-                      "\u613f\u4f60\u5386\u5c3d\u5343\u5e06\uff0c\u5f52\u6765\u4edd\u662f\u5c11\u5e74\u3002 \u2014\u2014 \u51af\u5510",
-                      "\u751f\u6d3b\u539f\u672c\u6c89\u95f7\uff0c\u4f46\u8dd1\u8d77\u6765\u5c31\u6709\u98ce\u3002 \u2014\u2014 \u300a\u5e73\u51e1\u7684\u4e16\u754c\u300b",
-                      "\u65e5\u843d\u5c24\u5176\u6e29\u67d4\uff0c\u4eba\u95f4\u7686\u662f\u6d6a\u6f2b\u3002 \u2014\u2014 \u73b0\u4ee3\u968f\u7b14",
-                      "\u77e5\u8db3\u4e14\u4e0a\u8fdb\uff0c\u6e29\u67d4\u4e14\u575a\u5b9a\u3002 \u2014\u2014 \u6cbb\u6108\u7cfb\u8bed\u5f55",
-                      "\u6625\u6765\u580f\u5f80\uff0c\u79cb\u6536\u51ac\u85cf\uff0c\u6211\u4eec\u6765\u65e5\u65b9\u957f\u3002 \u2014\u2014 \u6c6a\u66fe\u797a",
-                      "\u6ee1\u6000\u5e0c\u671b\uff0c\u5c31\u4f1a\u6240\u5411\u62ab\u9761\u3002 \u2014\u2014 \u5deb\u54f2",
-                      "\u751f\u6d3b\u660e\u6717\uff0c\u4e07\u7269\u53ef\u7231\uff0c\u4eba\u95f4\u503c\u5f97\uff0c\u672a\u6765\u53ef\u671f\u3002 \u2014\u2014 \u5b63\u7fa1\u6797",
-                      "\u4fdd\u6301\u70ed\u7231\uff0c\u5954\u8d74\u4e0b\u4e00\u573a\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4e2d\u56fd\u56fd\u5bb6\u5730\u7406\u300b",
-                      "\u628a\u7ec6\u788e\u7684\u65e5\u5b50\u8fc7\u6210\u8bd7\uff0c\u7b80\u5355\u4e14\u6e29\u6696\u3002 \u2014\u2014 \u7b80\u5bee",
-                      "\u8ffd\u5149\u7684\u4eba\uff0c\u7ec8\u4f1a\u4e07\u4e08\u5149\u8292\u3002 \u2014\u2014 \u7ecf\u5178\u52b1\u5fd7\u8bed\u5f55",
-                      "\u5fc3\u6709\u7e41\u82b1\uff0c\u4e00\u8def\u751f\u9999\u3002 \u2014\u2014 \u6cf0\u6208\u5c14"
-                  ]
-                  fb = random.choice(fallback_pool)
-                  print(f"[QuoteFetcher] fallback -> {fb}", flush=True)
+                  # 2. 从现代温暖治愈与早安心语库中随机挑选
+                  fb = random.choice(curated_pool)
+                  print(f"[QuoteFetcher] Curated Healing -> {fb}", flush=True)
                   return fb
 
               _orig_send_message = _sender.send_message
