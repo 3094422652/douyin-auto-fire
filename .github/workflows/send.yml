@@ -32,6 +32,9 @@ jobs:
       WEBHOOK_HEADERS: ${{ secrets.WEBHOOK_HEADERS }}
       WEBHOOK_TEMPLATE: ${{ secrets.WEBHOOK_TEMPLATE }}
       HEADLESS: "true"
+      TZ: "Asia/Shanghai"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      NODE_OPTIONS: "--no-deprecation"
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -193,7 +196,7 @@ jobs:
                   if proxy_url and not kwargs.get("proxy"):
                       kwargs["proxy"] = {"server": proxy_url}
                       print(f"[ProxyHook] BrowserType.launch_persistent_context -> {proxy_url}", flush=True)
-                  if "timezoneId" not in kwargs:
+                  if not kwargs.get("timezoneId"):
                       kwargs["timezoneId"] = "Asia/Shanghai"
                       print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
                   kwargs["args"] = list(kwargs.get("args") or [])
@@ -202,7 +205,7 @@ jobs:
                   return await _orig_launch_persistent(self, *args, **kwargs)
 
               async def _patched_new_context(self, *args, **kwargs):
-                  if "timezoneId" not in kwargs:
+                  if not kwargs.get("timezoneId"):
                       kwargs["timezoneId"] = "Asia/Shanghai"
                       print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
                   return await _orig_new_context(self, *args, **kwargs)
@@ -210,6 +213,27 @@ jobs:
               _bt.BrowserType.launch = _patched_launch
               _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
               _br.Browser.new_context = _patched_new_context
+
+              try:
+                  import app.browser as _app_browser
+
+                  async def _patched_first_visible_selector(page, selectors, timeout_ms):
+                      if not selectors:
+                          return None
+                      rounds = 3 if timeout_ms >= 3000 else 1
+                      step_ms = max(250, timeout_ms // (rounds * len(selectors)))
+                      for _ in range(rounds):
+                          for selector in selectors:
+                              try:
+                                  await page.locator(selector).first.wait_for(state="visible", timeout=step_ms)
+                                  return selector
+                              except Exception:
+                                  continue
+                      return None
+
+                  _app_browser._first_visible_selector = _patched_first_visible_selector
+              except ImportError:
+                  pass
 
           def _install_humanized_sender_hook():
               try:
@@ -326,15 +350,15 @@ jobs:
                   # 5. Offline Fallback Pool with Author/Source
                   fallback_pool = [
                       "\u53bb\u70ed\u7231\u751f\u6d3b\uff0c\u53bb\u5954\u8d74\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4eba\u6c11\u65e5\u62a5\u300b",
-                      "\u613f\u4f60\u5386\u5c3d\u5343\u5e06\uff0c\u5f52\u6765\u4edd\u662f\u5c11\u5e74\u3002 \u2014\u2014 \u51af\u5510",
+                      "\u613f\u4f60\u5386\u5c3d\u5343\u5e06\uff0c\u5f52\u6765\u4ecd\u662f\u5c11\u5e74\u3002 \u2014\u2014 \u51af\u5510",
                       "\u751f\u6d3b\u539f\u672c\u6c89\u95f7\uff0c\u4f46\u8dd1\u8d77\u6765\u5c31\u6709\u98ce\u3002 \u2014\u2014 \u300a\u5e73\u51e1\u7684\u4e16\u754c\u300b",
                       "\u65e5\u843d\u5c24\u5176\u6e29\u67d4\uff0c\u4eba\u95f4\u7686\u662f\u6d6a\u6f2b\u3002 \u2014\u2014 \u73b0\u4ee3\u968f\u7b14",
                       "\u77e5\u8db3\u4e14\u4e0a\u8fdb\uff0c\u6e29\u67d4\u4e14\u575a\u5b9a\u3002 \u2014\u2014 \u6cbb\u6108\u7cfb\u8bed\u5f55",
-                      "\u6625\u6765\u580f\u5f80\uff0c\u79cb\u6536\u51ac\u85cf\uff0c\u6211\u4eec\u6765\u65e5\u65b9\u957f\u3002 \u2014\u2014 \u6c6a\u66fe\u797a",
+                      "\u6625\u6765\u590f\u5f80\uff0c\u79cb\u6536\u51ac\u85cf\uff0c\u6211\u4eec\u6765\u65e5\u65b9\u957f\u3002 \u2014\u2014 \u6c6a\u66fe\u797a",
                       "\u6ee1\u6000\u5e0c\u671b\uff0c\u5c31\u4f1a\u6240\u5411\u62ab\u9761\u3002 \u2014\u2014 \u5deb\u54f2",
                       "\u751f\u6d3b\u660e\u6717\uff0c\u4e07\u7269\u53ef\u7231\uff0c\u4eba\u95f4\u503c\u5f97\uff0c\u672a\u6765\u53ef\u671f\u3002 \u2014\u2014 \u5b63\u7fa1\u6797",
                       "\u4fdd\u6301\u70ed\u7231\uff0c\u5954\u8d74\u4e0b\u4e00\u573a\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4e2d\u56fd\u56fd\u5bb6\u5730\u7406\u300b",
-                      "\u628a\u7ec6\u788e\u7684\u65e5\u5b50\u8fc7\u6210\u8bd7\uff0c\u7b80\u5355\u4e14\u6e29\u6696\u3002 \u2014\u2014 \u7b80\u5bee",
+                      "\u628a\u7ec6\u788e\u7684\u65e5\u5b50\u8fc7\u6210\u8bd7\uff0c\u7b80\u5355\u4e14\u6e29\u6696\u3002 \u2014\u2014 \u7b80\u5a9c",
                       "\u8ffd\u5149\u7684\u4eba\uff0c\u7ec8\u4f1a\u4e07\u4e08\u5149\u8292\u3002 \u2014\u2014 \u7ecf\u5178\u52b1\u5fd7\u8bed\u5f55",
                       "\u5fc3\u6709\u7e41\u82b1\uff0c\u4e00\u8def\u751f\u9999\u3002 \u2014\u2014 \u6cf0\u6208\u5c14"
                   ]
@@ -384,9 +408,9 @@ jobs:
                   try:
                       await page.wait_for_function(
                           r"""([txt]) => {
-                              const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea')];
+                              const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea, [data-contents=true], .DraftEditor-root [contenteditable=true], [contenteditable=true], textarea')];
                               const target = [...txt].slice(0, 30).join('').replace(/\s+/g, ' ');
-                              return es.some(e => ((e.innerText || e.textContent || '').replace(/\s+/g, ' ')).includes(target));
+                              return es.some(e => ((e.innerText || e.textContent || e.value || '').replace(/\s+/g, ' ')).includes(target));
                           }""",
                           arg=[content],
                           timeout=5000,
