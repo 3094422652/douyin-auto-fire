@@ -251,7 +251,6 @@ jobs:
                               try:
                                   entry["body_text"] = raw.decode("utf-8")[:1500]
                               except UnicodeDecodeError:
-                                  # Extract printable ASCII/UTF-8 strings from binary protobuf
                                   strings = re.findall(rb"[ -~]{4,}", raw)
                                   entry["body_proto_strings"] = [s.decode("ascii", errors="ignore") for s in strings[:40]]
                                   entry["body_hex"] = raw[:256].hex()
@@ -300,7 +299,7 @@ jobs:
 
           async def _dump_failed_message_fiber(page, label):
               try:
-                  dump = await page.evaluate(r'''() => {
+                  dump = await page.evaluate(r"""() => {
                       const out = { toasts: [], latest_msg: null };
                       document.querySelectorAll('[class*="toast"], [class*="Toast"], [class*="notice"], [class*="verify"], .semi-toast-content').forEach(el => {
                           const t = (el.innerText || '').trim();
@@ -331,7 +330,7 @@ jobs:
                                   if (msgObj && typeof msgObj === 'object') {
                                       const safe = {};
                                       for (const k of Object.keys(msgObj)) {
-                                          if (['status', 'checkCode', 'checkMessage', 'check_code', 'check_message', 'statusCode', 'status_code', 'ext', 'localExt', 'type', 'serverId', ' secSender'].includes(k) || k.toLowerCase().includes('err') || k.toLowerCase().includes('status') || k.toLowerCase().includes('check') || k.toLowerCase().includes('code')) {
+                                          if (['status', 'checkCode', 'checkMessage', 'check_code', 'check_message', 'statusCode', 'status_code', 'ext', 'localExt', 'type', 'serverId'].includes(k) || k.toLowerCase().includes('err') || k.toLowerCase().includes('status') || k.toLowerCase().includes('check') || k.toLowerCase().includes('code')) {
                                               try {
                                                   safe[k] = JSON.parse(JSON.stringify(msgObj[k]));
                                               } catch (e) {
@@ -347,7 +346,7 @@ jobs:
                           out.fiber_summaries = summaries;
                       }
                       return out;
-                  }''')
+                  }""")
                   _NET_DIAG["fiber_dumps"].append({"ts": time.time(), "label": label, "dump": dump})
                   _save_net_diag()
               except Exception as e:
@@ -441,24 +440,24 @@ jobs:
                   if not s:
                       return ""
                   s = re.sub(r"\s+", " ", s).strip()
-                  for ch in ("“", "”", """, "「", "」", "『", "』"):
+                  for ch in ("\u201c", "\u201d", "\"", "\u300c", "\u300d", "\u300e", "\u300f"):
                       s = s.strip(ch)
                   return s.strip()
 
               def _format_author(who, frm):
                   who = (who or "").strip()
                   frm = (frm or "").strip()
-                  if who in ("null", "None", "佚名"):
+                  if who in ("null", "None", "\u4f5a\u540d"):
                       who = ""
-                  if frm in ("null", "None", "原创", "网络", "一个高三"):
+                  if frm in ("null", "None", "\u539f\u521b", "\u7f51\u7edc", "\u4e00\u4e2a\u9ad8\u4e09"):
                       frm = ""
-                  for ch in ("《", "》", "<", ">"):
+                  for ch in ("\u300a", "\u300b", "<", ">"):
                       if frm.startswith(ch) and frm.endswith(ch):
                           frm = frm[1:-1].strip()
                       if who.startswith(ch) and who.endswith(ch):
                           who = who[1:-1].strip()
                   if who and frm and who != frm:
-                      return f"{who}《{frm}》"
+                      return f"{who}\u300a{frm}\u300b"
                   return who or frm
 
               def _fetch_quote():
@@ -468,7 +467,6 @@ jobs:
                   timeout = 2.5
                   headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-                  # 1. P1: Hitokoto (categories: d, i, k - literature, poetry, philosophy)
                   try:
                       r = _req.Request("https://v1.hitokoto.cn/?c=d&c=i&c=k&max_length=100", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
@@ -476,10 +474,10 @@ jobs:
                           h = _clean_text(data.get("hitokoto", ""))
                           auth = _clean_text(_format_author(data.get("from_who"), data.get("from")))
                           if auth:
-                              for ch in ("。", "！", "!", "."):
+                              for ch in ("\u3002", "\uff01", "!", "."):
                                   if h.endswith(ch):
                                       h = h[:-1]
-                              text = f"{h} —— {auth}"
+                              text = f"{h} \u2014\u2014 {auth}"
                           else:
                               text = h
                           if len(text) > 100:
@@ -490,7 +488,6 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] Hitokoto err ({type(e).__name__}), fallback to P2", flush=True)
 
-                  # 2. P2: xygeng API
                   try:
                       r = _req.Request("https://api.xygeng.cn/one", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
@@ -501,10 +498,10 @@ jobs:
                           if isinstance(d, dict):
                               auth = _clean_text(_format_author(d.get("name"), d.get("origin")))
                               if auth:
-                                  for ch in ("。", "！", "!", "."):
+                                  for ch in ("\u3002", "\uff01", "!", "."):
                                       if text.endswith(ch):
                                           text = text[:-1]
-                                  text = f"{text} —— {auth}"
+                                  text = f"{text} \u2014\u2014 {auth}"
                           if len(text) > 100:
                               text = text[:97] + "..."
                           if text:
@@ -513,7 +510,6 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] xygeng err ({type(e).__name__}), fallback to P3", flush=True)
 
-                  # 3. P3: SweetNothings
                   try:
                       r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
@@ -526,14 +522,13 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P4", flush=True)
 
-                  # 4. P4: Iciba
                   try:
                       r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                       with _req.urlopen(r, timeout=timeout) as resp:
                           data = _json.loads(resp.read().decode("utf-8"))
                           zh = _clean_text(data.get("note", ""))
                           en = _clean_text(data.get("content", ""))
-                          text = f"{en}（{zh}）" if (en and zh and len(en) + len(zh) + 2 <= 100) else (zh or en)
+                          text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) + 2 <= 100) else (zh or en)
                           if len(text) > 100:
                               text = text[:97] + "..."
                           if text:
@@ -542,20 +537,19 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] Iciba err ({type(e).__name__}), fallback to local pool", flush=True)
 
-                  # 5. Offline Fallback Pool
                   fallback_pool = [
-                      "去热爱生活，去奔赴山海。 —— 《人民日报》",
-                      "愿你历尽千帆，归来仍是少年。 —— 冯唐",
-                      "生活原本沉闷，但跑起来就有风。 —— 《平凡的世界》",
-                      "日落尤其温柔，人间皆是浪漫。 —— 现代随笔",
-                      "知足且上进，温柔且坚定。 —— 治愈系语录",
-                      "春来夏往，秋收冬藏，我们来日方长。 —— 汪曾祺",
-                      "满怀希望，就会所向披靡。 —— 巫哲",
-                      "生活明朗，万物可爱，人间值得，未来可期。 —— 季羡林",
-                      "保持热爱，奔赴下一场山海。 —— 《中国国家地理》",
-                      "把细碎的日子过成诗，简单且温暖。 —— 简媜",
-                      "追光的人，终会万丈光芒。 —— 经典励志语录",
-                      "心有繁花，一路生香。 —— 泰戈尔"
+                      "\u53bb\u70ed\u7231\u751f\u6d3b\uff0c\u53bb\u5954\u8d74\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4eba\u6c11\u65e5\u62a5\u300b",
+                      "\u613f\u4f60\u5386\u5c3d\u5343\u5e06\uff0c\u5f52\u6765\u4ecd\u662f\u5c11\u5e74\u3002 \u2014\u2014 \u51af\u5510",
+                      "\u751f\u6d3b\u539f\u672c\u6c89\u95f7\uff0c\u4f46\u8dd1\u8d77\u6765\u5c31\u6709\u98ce\u3002 \u2014\u2014 \u300a\u5e73\u51e1\u7684\u4e16\u754c\u300b",
+                      "\u65e5\u843d\u5c24\u5176\u6e29\u67d4\uff0c\u4eba\u95f4\u7686\u662f\u6d6a\u6f2b\u3002 \u2014\u2014 \u73b0\u4ee3\u968f\u7b14",
+                      "\u77e5\u8db3\u4e14\u4e0a\u8fdb\uff0c\u6e29\u67d4\u4e14\u575a\u5b9a\u3002 \u2014\u2014 \u6cbb\u6108\u7cfb\u8bed\u5f55",
+                      "\u6625\u6765\u590f\u5f80\uff0c\u79cb\u6536\u51ac\u85cf\uff0c\u6211\u4eec\u6765\u65e5\u65b9\u957f\u3002 \u2014\u2014 \u6c6a\u66fe\u797a",
+                      "\u6ee1\u6000\u5e0c\u671b\uff0c\u5c31\u4f1a\u6240\u5411\u62ab\u9761\u3002 \u2014\u2014 \u5deb\u54f2",
+                      "\u751f\u6d3b\u660e\u6717\uff0c\u4e07\u7269\u53ef\u7231\uff0c\u4eba\u95f4\u503c\u5f97\uff0c\u672a\u6765\u53ef\u671f\u3002 \u2014\u2014 \u5b63\u7fa1\u6797",
+                      "\u4fdd\u6301\u70ed\u7231\uff0c\u5954\u8d74\u4e0b\u4e00\u573a\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4e2d\u56fd\u56fd\u5bb6\u5730\u7406\u300b",
+                      "\u628a\u7ec6\u788e\u7684\u65e5\u5b50\u8fc7\u6210\u8bd7\uff0c\u7b80\u5355\u4e14\u6e29\u6696\u3002 \u2014\u2014 \u7b80\u5a9c",
+                      "\u8ffd\u5149\u7684\u4eba\uff0c\u7ec8\u4f1a\u4e07\u4e08\u5149\u8292\u3002 \u2014\u2014 \u7ecf\u5178\u52b1\u5fd7\u8bed\u5f55",
+                      "\u5fc3\u6709\u7e41\u82b1\uff0c\u4e00\u8def\u751f\u9999\u3002 \u2014\u2014 \u6cf0\u6208\u5c14"
                   ]
                   fb = random.choice(fallback_pool)
                   print(f"[QuoteFetcher] fallback -> {fb}", flush=True)
@@ -567,8 +561,8 @@ jobs:
                   if message.type == "text" and message.content:
                       val = message.content
                       v_stripped = val.strip()
-                      trigger_pattern = re.compile(r"\[(?:API|一言|金句|每日一句)\]|API|一言|金句|每日一句")
-                      exact_matches = ("一言", "金句", "每日一句", "API", "api", "[一言]", "[金句]", "[每日一句]", "[API]")
+                      trigger_pattern = re.compile(r"\[(?:API|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5)\]|\bAPI\b|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5")
+                      exact_matches = ("\u4e00\u8a00", "\u91d1\u53e5", "\u6bcf\u65e5\u4e00\u53e5", "API", "api", "[\u4e00\u8a00]", "[\u91d1\u53e5]", "[\u6bcf\u65e5\u4e00\u53e5]", "[API]")
                       if v_stripped in exact_matches or trigger_pattern.search(val):
                           q = _clean_text(_fetch_quote())
                           if v_stripped in exact_matches:
@@ -594,18 +588,18 @@ jobs:
                   p_speed = random.uniform(0.18, 0.30) if len(content) > 50 else random.uniform(0.30, 0.45)
                   for char in content:
                       await page.keyboard.insert_text(char)
-                      if char in "，。！？；、,.!?":
+                      if char in "\uff0c\u3002\uff01\uff1f\uff1b\u3001,.!?":
                           await asyncio.sleep(p_speed)
                       else:
                           await asyncio.sleep(speed)
 
                   try:
                       await page.wait_for_function(
-                          r'''([txt]) => {
+                          r"""([txt]) => {
                               const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea, [data-contents=true], .DraftEditor-root [contenteditable=true], [contenteditable=true], textarea')];
                               const target = [...txt].slice(0, 30).join('').replace(/\s+/g, ' ');
                               return es.some(e => ((e.innerText || e.textContent || e.value || '').replace(/\s+/g, ' ')).includes(target));
-                          }''',
+                          }""",
                           arg=[content],
                           timeout=5000,
                       )
@@ -618,17 +612,17 @@ jobs:
                   await page.wait_for_timeout(300)
                   await _sender._trigger_send(page)
                   try:
-                      await _sender._confirm_outgoing_message(page, before, label="文字", expected_text=content)
+                      await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
                       _save_net_diag()
                   except PageOperationError as exc:
                       await _dump_failed_message_fiber(page, "initial_send_failed")
-                      if "页面提示可以重试" in str(exc):
+                      if "\u9875\u9762\u63d0\u793a\u53ef\u4ee5\u91cd\u8bd5" in str(exc):
                           print("[HumanizeHook] Detected red exclamation mark, attempting click retry...", flush=True)
                           await page.wait_for_timeout(1500)
                           if await _sender._click_retry_on_latest_failed_message(page):
                               latest = page.locator(_sender.LATEST_OUTGOING_MESSAGE).first
                               try:
-                                  await _sender._await_send_terminal_state(page, latest, "文字")
+                                  await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
                                   print("[HumanizeHook] Retry click succeeded!", flush=True)
                                   _save_net_diag()
                                   return
