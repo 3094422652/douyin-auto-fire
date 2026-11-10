@@ -174,6 +174,15 @@ jobs:
           import re
           from pathlib import Path
 
+          _CLEAN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+          _ORPHAN_TICKET_COOKIES = {
+              "bd-web-sign-page-guard",
+              "bd_ticket_guard_pubKey",
+              "bd_ticket_guard_ticket",
+              "bd_ticket_guard_tssign",
+              "__security_mc_1_s_sdk_sign_data_key_web_protect",
+          }
+
           _NET_DIAG = {
               "xhr_fetch": [],
               "request_failed": [],
@@ -366,6 +375,7 @@ jobs:
               _orig_launch_persistent = _bt.BrowserType.launch_persistent_context
               _orig_new_context = _br.Browser.new_context
               _orig_new_page = _bc.BrowserContext.new_page
+              _orig_add_cookies = _bc.BrowserContext.add_cookies
 
               async def _patched_launch(self, *args, **kwargs):
                   if proxy_url and not kwargs.get("proxy"):
@@ -374,6 +384,8 @@ jobs:
                   kwargs["args"] = list(kwargs.get("args") or [])
                   if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
                       kwargs["args"].append("--disable-blink-features=AutomationControlled")
+                  if not any(a.startswith("--user-agent=") for a in kwargs["args"]):
+                      kwargs["args"].append(f"--user-agent={_CLEAN_UA}")
                   return await _orig_launch(self, *args, **kwargs)
 
               async def _patched_launch_persistent(self, *args, **kwargs):
@@ -383,6 +395,8 @@ jobs:
                   if not kwargs.get("timezoneId"):
                       kwargs["timezoneId"] = "Asia/Shanghai"
                       print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
+                  if not kwargs.get("userAgent"):
+                      kwargs["userAgent"] = _CLEAN_UA
                   kwargs["args"] = list(kwargs.get("args") or [])
                   if "--disable-blink-features=AutomationControlled" not in kwargs["args"]:
                       kwargs["args"].append("--disable-blink-features=AutomationControlled")
@@ -392,13 +406,26 @@ jobs:
                   if not kwargs.get("timezoneId"):
                       kwargs["timezoneId"] = "Asia/Shanghai"
                       print("[ProxyHook] Injected timezone_id -> Asia/Shanghai", flush=True)
+                  if not kwargs.get("userAgent"):
+                      kwargs["userAgent"] = _CLEAN_UA
                   return await _orig_new_context(self, *args, **kwargs)
+
+              async def _patched_add_cookies(self, cookies):
+                  filtered = [c for c in cookies if c.get("name") not in _ORPHAN_TICKET_COOKIES]
+                  removed = len(cookies) - len(filtered)
+                  if removed:
+                      print(f"[ProxyHook] Stripped {removed} localStorage-bound ticket-guard cookies", flush=True)
+                  return await _orig_add_cookies(self, filtered)
 
               async def _patched_new_page(self, *args, **kwargs):
                   page = await _orig_new_page(self, *args, **kwargs)
                   try:
                       from playwright.async_api._generated import Page as AsyncPage
-                      _attach_page_diagnostics(AsyncPage(page))
+                      apage = AsyncPage(page)
+                      await apage.add_init_script(
+                          "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
+                      )
+                      _attach_page_diagnostics(apage)
                   except Exception as e:
                       print(f"[DiagHook] attach error: {e}", flush=True)
                   return page
@@ -406,6 +433,7 @@ jobs:
               _bt.BrowserType.launch = _patched_launch
               _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
               _br.Browser.new_context = _patched_new_context
+              _bc.BrowserContext.add_cookies = _patched_add_cookies
               _bc.BrowserContext.new_page = _patched_new_page
 
               try:
@@ -465,7 +493,7 @@ jobs:
                   import json as _json
 
                   timeout = 2.5
-                  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                  headers = {"User-Agent": _CLEAN_UA}
 
                   try:
                       r = _req.Request("https://v1.hitokoto.cn/?c=d&c=i&c=k&max_length=100", headers=headers)
@@ -675,7 +703,7 @@ jobs:
           pkill -f "/tmp/xray/xray" || true
 
       - name: Encrypt diagnostics artifacts (7-Zip AES-256)
-        if: always()
+        if: failure()
         shell: bash
         env:
           ARTIFACT_PASSWORD: ${{ secrets.ARTIFACT_PASSWORD }}
@@ -711,7 +739,7 @@ jobs:
           echo "诊断产物已成功通过 AES-256 强加密打包（文件名已隐藏）！"
 
       - name: Upload encrypted diagnostics
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: douyin-encrypted-diagnostics-${{ github.run_id }}
