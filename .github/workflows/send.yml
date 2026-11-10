@@ -692,12 +692,12 @@ jobs:
           fi
 
       - name: Stop Xray Proxy Tunnel
-        if: always()
+        if: failure()
         run: |
           pkill -f "/tmp/xray/xray" || true
 
       - name: Encrypt diagnostics artifacts (7-Zip AES-256)
-        if: always()
+        if: failure()
         shell: bash
         env:
           ARTIFACT_PASSWORD: ${{ secrets.ARTIFACT_PASSWORD }}
@@ -733,7 +733,7 @@ jobs:
           echo "诊断产物已成功通过 AES-256 强加密打包（文件名已隐藏）！"
 
       - name: Upload encrypted diagnostics
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: douyin-encrypted-diagnostics-${{ github.run_id }}
