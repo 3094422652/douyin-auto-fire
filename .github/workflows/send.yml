@@ -175,13 +175,6 @@ jobs:
           from pathlib import Path
 
           _CLEAN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-          _ORPHAN_TICKET_COOKIES = {
-              "bd-web-sign-page-guard",
-              "bd_ticket_guard_pubKey",
-              "bd_ticket_guard_ticket",
-              "bd_ticket_guard_tssign",
-              "__security_mc_1_s_sdk_sign_data_key_web_protect",
-          }
 
           _NET_DIAG = {
               "xhr_fetch": [],
@@ -375,7 +368,6 @@ jobs:
               _orig_launch_persistent = _bt.BrowserType.launch_persistent_context
               _orig_new_context = _br.Browser.new_context
               _orig_new_page = _bc.BrowserContext.new_page
-              _orig_add_cookies = _bc.BrowserContext.add_cookies
 
               async def _patched_launch(self, *args, **kwargs):
                   if proxy_url and not kwargs.get("proxy"):
@@ -410,13 +402,6 @@ jobs:
                       kwargs["userAgent"] = _CLEAN_UA
                   return await _orig_new_context(self, *args, **kwargs)
 
-              async def _patched_add_cookies(self, cookies):
-                  filtered = [c for c in cookies if c.get("name") not in _ORPHAN_TICKET_COOKIES]
-                  removed = len(cookies) - len(filtered)
-                  if removed:
-                      print(f"[ProxyHook] Stripped {removed} localStorage-bound ticket-guard cookies", flush=True)
-                  return await _orig_add_cookies(self, filtered)
-
               async def _patched_new_page(self, *args, **kwargs):
                   page = await _orig_new_page(self, *args, **kwargs)
                   try:
@@ -433,7 +418,6 @@ jobs:
               _bt.BrowserType.launch = _patched_launch
               _bt.BrowserType.launch_persistent_context = _patched_launch_persistent
               _br.Browser.new_context = _patched_new_context
-              _bc.BrowserContext.add_cookies = _patched_add_cookies
               _bc.BrowserContext.new_page = _patched_new_page
 
               try:
@@ -603,6 +587,14 @@ jobs:
                           print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
+              async def _save_success_screenshot(page):
+                  try:
+                      sdir = Path("artifacts/screenshots")
+                      sdir.mkdir(parents=True, exist_ok=True)
+                      await page.screenshot(path=str(sdir / f"success-{int(time.time()*1000)}.png"), full_page=True)
+                  except Exception as e:
+                      print(f"[DiagHook] Failed to save success screenshot: {e}", flush=True)
+
               async def _patched_send_text(chat, content):
                   content = _clean_text(content)
                   if len(content) > 100:
@@ -641,6 +633,7 @@ jobs:
                   await _sender._trigger_send(page)
                   try:
                       await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
+                      await _save_success_screenshot(page)
                       _save_net_diag()
                   except PageOperationError as exc:
                       await _dump_failed_message_fiber(page, "initial_send_failed")
@@ -652,6 +645,7 @@ jobs:
                               try:
                                   await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
                                   print("[HumanizeHook] Retry click succeeded!", flush=True)
+                                  await _save_success_screenshot(page)
                                   _save_net_diag()
                                   return
                               except PageOperationError:
@@ -703,7 +697,7 @@ jobs:
           pkill -f "/tmp/xray/xray" || true
 
       - name: Encrypt diagnostics artifacts (7-Zip AES-256)
-        if: failure()
+        if: always()
         shell: bash
         env:
           ARTIFACT_PASSWORD: ${{ secrets.ARTIFACT_PASSWORD }}
@@ -739,7 +733,7 @@ jobs:
           echo "诊断产物已成功通过 AES-256 强加密打包（文件名已隐藏）！"
 
       - name: Upload encrypted diagnostics
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: douyin-encrypted-diagnostics-${{ github.run_id }}
