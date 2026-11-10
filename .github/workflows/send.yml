@@ -48,16 +48,26 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt playwright==1.64.1
+        run: pip install -r requirements.txt
 
       - name: Cache Playwright browsers
+        id: playwright-cache
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
 
       - name: Install Playwright browsers
-        run: python -m playwright install --with-deps chromium
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
+            python -m playwright install chromium
+          fi
+          if ! fc-list :lang=zh 2>/dev/null | grep -q .; then
+            sudo apt-get update -o Acquire::http::Timeout=5 -o Acquire::Retries=1 -qq || true
+            sudo apt-get install -y --no-install-recommends -o Acquire::http::Timeout=5 -o Acquire::Retries=1 -qq fonts-wqy-zenhei || true
+          fi
 
       - name: Write protected configuration
         shell: bash
@@ -167,193 +177,11 @@ jobs:
           cat << 'EOF' > "$HOOK_DIR/sitecustomize.py"
           import os
           import sys
-          import json
-          import time
           import asyncio
           import random
           import re
-          from pathlib import Path
 
           _CLEAN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-
-          _NET_DIAG = {
-              "xhr_fetch": [],
-              "request_failed": [],
-              "websockets": [],
-              "console": [],
-              "fiber_dumps": [],
-          }
-
-          def _save_net_diag():
-              try:
-                  out_dir = Path("artifacts")
-                  out_dir.mkdir(parents=True, exist_ok=True)
-                  (out_dir / "im_net_diag.json").write_text(
-                      json.dumps(_NET_DIAG, ensure_ascii=False, indent=2, default=str),
-                      encoding="utf-8",
-                  )
-              except Exception as e:
-                  print(f"[DiagHook] Failed to save im_net_diag.json: {e}", flush=True)
-
-          def _attach_page_diagnostics(page):
-              def _on_console(msg):
-                  try:
-                      if msg.type in ("error", "warning") or "im" in msg.text.lower() or "send" in msg.text.lower() or "ticket" in msg.text.lower():
-                          _NET_DIAG["console"].append({
-                              "ts": time.time(),
-                              "type": msg.type,
-                              "text": msg.text[:500],
-                          })
-                          _save_net_diag()
-                  except Exception:
-                      pass
-
-              def _on_request_failed(req):
-                  try:
-                      _NET_DIAG["request_failed"].append({
-                          "ts": time.time(),
-                          "url": req.url[:300],
-                          "method": req.method,
-                          "resource_type": req.resource_type,
-                          "failure": req.failure,
-                      })
-                      _save_net_diag()
-                  except Exception:
-                      pass
-
-              async def _on_response(resp):
-                  try:
-                      url = resp.url
-                      rtype = resp.request.resource_type
-                      interesting = (
-                          rtype in ("xhr", "fetch")
-                          or resp.status >= 400
-                          or any(k in url.lower() for k in ("imapi", "message", "send", "frontier", "ticket", "verify", "captcha", "aweme/v1/web/im"))
-                      )
-                      if not interesting:
-                          return
-                      entry = {
-                          "ts": time.time(),
-                          "url": url[:400],
-                          "method": resp.request.method,
-                          "status": resp.status,
-                          "resource_type": rtype,
-                          "resp_headers": {
-                              k: v for k, v in resp.headers.items()
-                              if any(h in k.lower() for h in ("content-type", "ticket", "logid", "tt-", "verify", "bdturing", "error"))
-                          },
-                          "req_headers": {
-                              k: v for k, v in resp.request.headers.items()
-                              if any(h in k.lower() for h in ("user-agent", "ticket", "csrf", "sec-ch-ua", "referer", "origin"))
-                          },
-                      }
-                      if any(k in url.lower() for k in ("imapi", "message/send", "send_message", "ticket", "verify", "aweme/v1/web/im")) or resp.status >= 400:
-                          try:
-                              raw = await resp.body()
-                              try:
-                                  entry["body_text"] = raw.decode("utf-8")[:1500]
-                              except UnicodeDecodeError:
-                                  strings = re.findall(rb"[ -~]{4,}", raw)
-                                  entry["body_proto_strings"] = [s.decode("ascii", errors="ignore") for s in strings[:40]]
-                                  entry["body_hex"] = raw[:256].hex()
-                          except Exception as be:
-                              entry["body_err"] = str(be)
-                      _NET_DIAG["xhr_fetch"].append(entry)
-                      if len(_NET_DIAG["xhr_fetch"]) > 200:
-                          _NET_DIAG["xhr_fetch"] = _NET_DIAG["xhr_fetch"][-200:]
-                      _save_net_diag()
-                  except Exception:
-                      pass
-
-              def _on_websocket(ws):
-                  try:
-                      ws_entry = {
-                          "ts": time.time(),
-                          "url": ws.url[:400],
-                          "events": [],
-                      }
-                      _NET_DIAG["websockets"].append(ws_entry)
-                      ws.on("close", lambda _: (ws_entry["events"].append({"ts": time.time(), "event": "close"}), _save_net_diag()))
-                      ws.on("socketerror", lambda err: (ws_entry["events"].append({"ts": time.time(), "event": "error", "err": str(err)}), _save_net_diag()))
-                      def _on_frame_sent(payload):
-                          if len(ws_entry["events"]) < 60:
-                              ws_entry["events"].append({"ts": time.time(), "dir": "sent", "len": len(payload)})
-                      def _on_frame_received(payload):
-                          if len(ws_entry["events"]) < 60:
-                              info = {"ts": time.time(), "dir": "recv", "len": len(payload)}
-                              if isinstance(payload, bytes):
-                                  strs = re.findall(rb"[ -~]{4,}", payload)
-                                  info["strs"] = [s.decode("ascii", errors="ignore") for s in strs[:15]]
-                              elif isinstance(payload, str):
-                                  info["text"] = payload[:300]
-                              ws_entry["events"].append(info)
-                              _save_net_diag()
-                      ws.on("framesent", _on_frame_sent)
-                      ws.on("framereceived", _on_frame_received)
-                      _save_net_diag()
-                  except Exception:
-                      pass
-
-              page.on("console", _on_console)
-              page.on("requestfailed", _on_request_failed)
-              page.on("response", lambda r: asyncio.ensure_future(_on_response(r)))
-              page.on("websocket", _on_websocket)
-
-          async def _dump_failed_message_fiber(page, label):
-              try:
-                  dump = await page.evaluate(r"""() => {
-                      const out = { toasts: [], latest_msg: null };
-                      document.querySelectorAll('[class*="toast"], [class*="Toast"], [class*="notice"], [class*="verify"], .semi-toast-content').forEach(el => {
-                          const t = (el.innerText || '').trim();
-                          if (t) out.toasts.push(t.slice(0, 200));
-                      });
-                      const sel = '.messageMessageListlist [data-index="0"] .messageMessageBoxmessageBox:has(.messageMessageBoxcontentBox.messageMessageBoxisFromMe)';
-                      const box = document.querySelector(sel);
-                      if (!box) return out;
-                      out.latest_html_classes = box.className;
-                      const retryEl = box.querySelector('[class*="SendStatus"], [aria-label*="重试"], [title*="重试"]');
-                      if (retryEl) {
-                          out.retry_el = {
-                              tag: retryEl.tagName,
-                              cls: retryEl.className,
-                              aria: retryEl.getAttribute('aria-label'),
-                              title: retryEl.getAttribute('title'),
-                              outer: retryEl.outerHTML.slice(0, 400),
-                          };
-                      }
-                      const fk = Object.keys(box).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
-                      if (fk) {
-                          let curr = box[fk];
-                          const summaries = [];
-                          for (let i = 0; i < 12 && curr; i++) {
-                              const p = curr.memoizedProps || curr.pendingProps;
-                              if (p && typeof p === 'object') {
-                                  const msgObj = p.message || p.msg || p.item || p.data;
-                                  if (msgObj && typeof msgObj === 'object') {
-                                      const safe = {};
-                                      for (const k of Object.keys(msgObj)) {
-                                          if (['status', 'checkCode', 'checkMessage', 'check_code', 'check_message', 'statusCode', 'status_code', 'ext', 'localExt', 'type', 'serverId'].includes(k) || k.toLowerCase().includes('err') || k.toLowerCase().includes('status') || k.toLowerCase().includes('check') || k.toLowerCase().includes('code')) {
-                                              try {
-                                                  safe[k] = JSON.parse(JSON.stringify(msgObj[k]));
-                                              } catch (e) {
-                                                  safe[k] = String(msgObj[k]);
-                                              }
-                                          }
-                                      }
-                                      summaries.push({ depth: i, keys: Object.keys(msgObj), extracted: safe });
-                                  }
-                              }
-                              curr = curr.return;
-                          }
-                          out.fiber_summaries = summaries;
-                      }
-                      return out;
-                  }""")
-                  _NET_DIAG["fiber_dumps"].append({"ts": time.time(), "label": label, "dump": dump})
-                  _save_net_diag()
-              except Exception as e:
-                  _NET_DIAG["fiber_dumps"].append({"ts": time.time(), "label": label, "err": str(e)})
-                  _save_net_diag()
 
           def _install_playwright_proxy_hook():
               proxy_url = os.environ.get("LOCAL_XRAY_PROXY", "socks5://127.0.0.1:10808").strip()
@@ -406,13 +234,11 @@ jobs:
                   page = await _orig_new_page(self, *args, **kwargs)
                   try:
                       from playwright.async_api._generated import Page as AsyncPage
-                      apage = AsyncPage(page)
-                      await apage.add_init_script(
+                      await AsyncPage(page).add_init_script(
                           "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
                       )
-                      _attach_page_diagnostics(apage)
-                  except Exception as e:
-                      print(f"[DiagHook] attach error: {e}", flush=True)
+                  except Exception:
+                      pass
                   return page
 
               _bt.BrowserType.launch = _patched_launch
@@ -587,14 +413,6 @@ jobs:
                           print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
-              async def _save_success_screenshot(page):
-                  try:
-                      sdir = Path("artifacts/screenshots")
-                      sdir.mkdir(parents=True, exist_ok=True)
-                      await page.screenshot(path=str(sdir / f"success-{int(time.time()*1000)}.png"), full_page=True)
-                  except Exception as e:
-                      print(f"[DiagHook] Failed to save success screenshot: {e}", flush=True)
-
               async def _patched_send_text(chat, content):
                   content = _clean_text(content)
                   if len(content) > 100:
@@ -633,24 +451,15 @@ jobs:
                   await _sender._trigger_send(page)
                   try:
                       await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
-                      await _save_success_screenshot(page)
-                      _save_net_diag()
                   except PageOperationError as exc:
-                      await _dump_failed_message_fiber(page, "initial_send_failed")
                       if "\u9875\u9762\u63d0\u793a\u53ef\u4ee5\u91cd\u8bd5" in str(exc):
                           print("[HumanizeHook] Detected red exclamation mark, attempting click retry...", flush=True)
                           await page.wait_for_timeout(1500)
                           if await _sender._click_retry_on_latest_failed_message(page):
                               latest = page.locator(_sender.LATEST_OUTGOING_MESSAGE).first
-                              try:
-                                  await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
-                                  print("[HumanizeHook] Retry click succeeded!", flush=True)
-                                  await _save_success_screenshot(page)
-                                  _save_net_diag()
-                                  return
-                              except PageOperationError:
-                                  await _dump_failed_message_fiber(page, "after_retry_failed")
-                                  raise
+                              await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
+                              print("[HumanizeHook] Retry click succeeded!", flush=True)
+                              return
                       raise
 
               _sender.send_message = _patched_send_message
@@ -692,7 +501,7 @@ jobs:
           fi
 
       - name: Stop Xray Proxy Tunnel
-        if: failure()
+        if: always()
         run: |
           pkill -f "/tmp/xray/xray" || true
 
