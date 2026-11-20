@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
     env:
       DOUYIN_COOKIE: ${{ secrets.DOUYIN_COOKIE }}
       DOUYIN_CONFIG: ${{ secrets.DOUYIN_CONFIG }}
@@ -168,6 +168,28 @@ jobs:
           echo "::add-mask::$PROXY_IP"
           echo "代理隧道校验通过！当前加密出口 IP: ${PROXY_IP}"
 
+      - name: Fetch quote-state branch (防重复句子状态)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          STATE_DIR="/tmp/quote_state"
+          OUT_DIR="/tmp/quote_state_out"
+          rm -rf "$STATE_DIR" "$OUT_DIR"
+          mkdir -p "$STATE_DIR" "$OUT_DIR"
+          git init -q "$STATE_DIR"
+          if git -C "$STATE_DIR" fetch --depth=1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" quote-state 2>/dev/null; then
+            git -C "$STATE_DIR" checkout -q -B quote-state FETCH_HEAD
+            echo "已同步 quote-state 分支状态！"
+          else
+            git -C "$STATE_DIR" checkout -q --orphan quote-state
+            echo "首次运行，初始化空 quote-state 工作区"
+          fi
+          echo "QUOTE_STATE_DIR=${STATE_DIR}" >> "$GITHUB_ENV"
+          echo "QUOTE_OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
+
       - name: Inject Zero-Intrusion Playwright Proxy Hook (sitecustomize.py)
         run: |
           set -e
@@ -177,11 +199,55 @@ jobs:
           cat << 'EOF' > "$HOOK_DIR/sitecustomize.py"
           import os
           import sys
+          import json
+          import gzip
+          import hashlib
+          import time
           import asyncio
           import random
           import re
+          from pathlib import Path
 
           _CLEAN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+          _SOURCE_BLACKLIST = (
+              # Classical books, dynasties, essays, poetry titles & ancient/religious/political authors
+              "论语", "孟子", "庄子", "庄周", "齐物论", "逍遥游", "老子", "道德经", "南华经", "荀子", "韩非子", "墨子",
+              "管子", "列子", "孙子兵法", "礼记", "中庸", "易经", "周易", "尚书", "诗经", "楚辞", "离骚", "左传",
+              "战国策", "晏子春秋", "史记", "汉书", "后汉书", "三国志", "三国演义", "魏书", "资治通鉴", "晋书", "宋史", "明史",
+              "红楼梦", "古文观止", "世说新语", "文心雕龙", "淮南子", "吕氏春秋", "抱朴子", "菜根谭", "小窗幽记", "围炉夜话",
+              "颜氏家训", "朱子家训", "增广贤文", "弟子规", "三字经", "千字文", "声律启蒙",
+              "唐诗", "宋词", "元曲", "诗词", "诗集", "词集", "诗选", "绝句", "律诗", "俳句", "对联", "古谚", "拉丁古谚",
+              "岳阳楼记", "醉翁亭记", "滕王阁序", "阿房宫赋", "赤壁赋", "兰亭集序", "山海经", "搜神记",
+              "出师表", "陈情表", "师说", "捕蛇者说", "爱莲说", "陋室铭", "桃花源记", "项脊轩志", "石壕吏", "河中石兽",
+              "渔家傲", "沁园春", "水调歌头", "念奴娇", "满江红", "定风波", "临江仙", "踏莎行", "青玉案", "声声慢",
+              "永遇乐", "菩萨蛮", "蝶恋花", "江城子", "如梦令", "虞美人", "破阵子", "西江月", "浣溪沙", "清平乐",
+              "鹧鸪天", "鹊桥仙", "卜算子", "钗头凤", "长相思", "浪淘沙", "天净沙", "归去来兮", "离思", "梅岭三章",
+              "短歌行", "将进酒", "春江花月夜", "长恨歌", "琵琶行", "蜀道难", "过零丁洋", "正气歌", "木兰诗", "孔雀东南飞",
+              "传习录", "闲情偶寄", "浮生六记", "聊斋", "幽梦影", "东坡志林", "梦溪笔谈", "阅微草堂", "饮水词", "人间词话",
+              "东周列国志", "警世通言", "喻世明言", "醒世恒言", "说唐", "神童诗", "心印杂记", "有缘", "寒菊", "赠从弟",
+              "无题·惯于", "过三峡", "丙午年", "戏愁", "碧水凌涛", "月雩", "任知",
+              # Ancient poets & thinkers
+              "孔子", "屈原", "司马迁", "诸葛亮", "曹操", "曹植", "魏收", "北朝", "南朝",
+              "陶渊明", "王羲之", "谢灵运", "庾信", "王勃", "骆宾王", "王维", "孟浩然", "李白", "杜甫", "白居易",
+              "韩愈", "柳宗元", "刘禹锡", "李贺", "杜牧", "李商隐", "温庭筠", "李煜", "范仲淹", "欧阳修", "王安石",
+              "苏轼", "苏洵", "苏辙", "曾巩", "黄庭坚", "秦观", "柳永", "周邦彦", "李清照", "陆游", "辛弃疾", "姜夔",
+              "陈亮", "陈与义", "文天祥", "元稹", "关汉卿", "马致远", "王实甫", "归有光", "王阳明", "王守仁", "张岱",
+              "袁宏道", "纳兰性德", "纳兰容若", "顾炎武", "龚自珍", "纪昀", "蒲松龄", "曹雪芹", "洪应明", "陈继儒", "仓央嘉措",
+              "罗贯中", "施耐庵", "吴承恩", "陈寿", "徐清", "李涉", "宋玉", "司马相如", "班固", "贾谊", "马一浮",
+              "汪洙", "郑思肖", "刘桢", "王常月", "溪翁", "郑明河",
+              # Religious & Political
+              "圣经", "Holy Bible", "Bible", "新约", "旧约", "福音", "传道书", "启示录", "古兰经", "佛经", "金刚经",
+              "心经", "法华经", "坛经", "楞严经", "四十二章经", "了义经", "阿弥陀经",
+              "毛泽东", "毛主席", "毛选", "邓小平", "周恩来", "刘少奇", "朱德", "马克思", "恩格斯", "列宁", "斯大林",
+              "托洛茨基", "共产党宣言", "资本论", "习近平", "每日一习话", "毛泽东语录", "毛主席语录", "陈毅",
+              "孙中山", "孙中山遗嘱", "国民党", "革命",
+          )
+
+          _SESSION_USED_UUIDS = set()
+          _SESSION_USED_TEXTS = set()
+          _PENDING_UUIDS = {}
+          _CACHED_POOL = None
 
           def _install_playwright_proxy_hook():
               proxy_url = os.environ.get("LOCAL_XRAY_PROXY", "socks5://127.0.0.1:10808").strip()
@@ -267,131 +333,296 @@ jobs:
               except ImportError:
                   pass
 
+          def _clean_text(s):
+              if not s:
+                  return ""
+              s = re.sub(r"\s+", " ", s).strip()
+              for ch in ("\u201c", "\u201d", "\"", "\u300c", "\u300d", "\u300e", "\u300f"):
+                  s = s.strip(ch)
+              return s.strip()
+
+          def _format_author(who, frm):
+              who = (who or "").strip()
+              frm = (frm or "").strip()
+              if who in ("null", "None", "\u4f5a\u540d", "-"):
+                  who = ""
+              if frm in ("null", "None", "\u539f\u521b", "\u7f51\u7edc", "\u4e00\u4e2a\u9ad8\u4e09", "-"):
+                  frm = ""
+              for ch in ("\u300a", "\u300b", "<", ">"):
+                  if frm.startswith(ch) and frm.endswith(ch):
+                      frm = frm[1:-1].strip()
+                  if who.startswith(ch) and who.endswith(ch):
+                      who = who[1:-1].strip()
+              if who and frm and who != frm:
+                  return f"{who}\u300a{frm}\u300b"
+              return who or frm
+
+          def _format_entry(entry):
+              h = _clean_text(entry.get("hitokoto") or entry.get("h") or "")
+              who = entry.get("from_who") if "from_who" in entry else entry.get("w")
+              frm = entry.get("from") if "from" in entry else entry.get("f")
+              auth = _clean_text(_format_author(who, frm))
+              if auth:
+                  h = re.sub(r"[\u3002\uff01!.\s]+$", "", h)
+                  return f"{h} \u2014\u2014 {auth}"
+              return h
+
+          def _is_valid_entry(entry):
+              if not isinstance(entry, dict):
+                  return False
+              raw_h = _clean_text(entry.get("hitokoto") or entry.get("h") or "")
+              if len(raw_h) < 4:
+                  return False
+              formatted = _format_entry(entry)
+              if not formatted or len(formatted) > 100:
+                  return False
+              if re.search(r"[\u3040-\u30ff\uac00-\ud7af]", raw_h):
+                  return False
+              cjk = len(re.findall(r"[\u4e00-\u9fff]", raw_h))
+              ascii_letters = sum(1 for c in raw_h if ("a" <= c <= "z") or ("A" <= c <= "Z"))
+              if cjk < 4 or ascii_letters > cjk:
+                  return False
+              who = (entry.get("from_who") if "from_who" in entry else entry.get("w")) or ""
+              frm = (entry.get("from") if "from" in entry else entry.get("f")) or ""
+              meta = f"{who} {frm}"
+              for kw in _SOURCE_BLACKLIST:
+                  if kw in meta:
+                      return False
+              if any(kw in raw_h for kw in ("上帝说", "耶和华", "阿门", "阿弥陀佛", "无产阶级", "资产阶级", "共产主义", "跟党走", "革命尚未成功", "社会主义")):
+                  return False
+              modern_hits = sum(raw_h.count(p) for p in ("的", "了", "吗", "呢", "吧", "啊", "着", "在", "是", "我", "你"))
+              classical_hits = sum(raw_h.count(p) for p in ("矣", "焉", "哉", "乎", "兮", "欤", "曰", "吾"))
+              if classical_hits >= 1 and modern_hits == 0:
+                  return False
+              if ("者" in raw_h and "也" in raw_h) and modern_hits == 0:
+                  return False
+              has_mod = any(m in raw_h for m in ("的", "了", "吗", "呢", "吧", "啊", "着", "我", "你", "他", "她", "是", "在", "们", "就", "会", "要", "都", "很", "因为", "所以", "如果", "但是", "虽然", "也许", "生活", "世界", "人生"))
+              if not has_mod:
+                  segs = [re.sub(r"[^\u4e00-\u9fff]", "", s) for s in re.split(r"[，。！？；、,!\?;.\s]+", raw_h)]
+                  segs = [s for s in segs if s]
+                  lens = [len(s) for s in segs]
+                  if len(segs) >= 2 and len(set(lens)) == 1 and lens[0] in (5, 7):
+                      return False
+              return True
+
+          def _load_bundle_category(cat, timeout=4.0):
+              import urllib.request as _req
+              headers = {"User-Agent": _CLEAN_UA}
+              urls = (
+                  f"https://raw.githubusercontent.com/hitokoto-osc/sentences-bundle/master/sentences/{cat}.json",
+                  f"https://cdn.jsdelivr.net/gh/hitokoto-osc/sentences-bundle@latest/sentences/{cat}.json",
+              )
+              for url in urls:
+                  try:
+                      r = _req.Request(url, headers=headers)
+                      with _req.urlopen(r, timeout=timeout) as resp:
+                          data = json.loads(resp.read().decode("utf-8"))
+                          if isinstance(data, list) and data:
+                              return data
+                  except Exception as e:
+                      print(f"[QuoteFetcher] Bundle {cat} err from {url.split('/')[2]}: {type(e).__name__}", flush=True)
+              return None
+
+          def _load_pool_and_state():
+              global _CACHED_POOL
+              state_dir = Path(os.environ.get("QUOTE_STATE_DIR", "/tmp/quote_state"))
+              out_dir = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out"))
+              out_dir.mkdir(parents=True, exist_ok=True)
+
+              sent_uuids = set()
+              cycle = 1
+              sent_path = state_dir / "sent.json"
+              if sent_path.exists():
+                  try:
+                      st = json.loads(sent_path.read_text(encoding="utf-8"))
+                      if isinstance(st, dict):
+                          sent_uuids = set(st.get("sent_uuids") or [])
+                          cycle = int(st.get("cycle") or 1)
+                  except Exception as e:
+                      print(f"[QuoteFetcher] Warning reading sent.json: {e}", flush=True)
+
+              if _CACHED_POOL is not None:
+                  return _CACHED_POOL, sent_uuids, cycle
+
+              cache_path = state_dir / "pool_cache.json.gz"
+              d_raw = _load_bundle_category("d")
+              k_raw = _load_bundle_category("k")
+
+              if d_raw is not None and k_raw is not None:
+                  seen_fmt = set()
+                  compact_pool = []
+                  for x in d_raw + k_raw:
+                      if not _is_valid_entry(x):
+                          continue
+                      fmt = _format_entry(x)
+                      if fmt in seen_fmt:
+                          continue
+                      seen_fmt.add(fmt)
+                      compact_pool.append({
+                          "u": x.get("uuid") or "",
+                          "h": x.get("hitokoto") or "",
+                          "w": x.get("from_who") or "",
+                          "f": x.get("from") or "",
+                          "t": x.get("type") or "",
+                      })
+                  if compact_pool:
+                      new_json = json.dumps(compact_pool, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                      old_json = b""
+                      if cache_path.exists():
+                          try:
+                              old_json = gzip.decompress(cache_path.read_bytes())
+                          except Exception:
+                              old_json = b""
+                      if hashlib.sha256(new_json).hexdigest() != hashlib.sha256(old_json).hexdigest():
+                          (out_dir / "pool_cache.json.gz").write_bytes(gzip.compress(new_json, compresslevel=9))
+                          print(f"[QuoteFetcher] Refreshed live d+k pool cache: {len(compact_pool)} clean entries", flush=True)
+                      else:
+                          print(f"[QuoteFetcher] Loaded live d+k pool ({len(compact_pool)} entries, cache up-to-date)", flush=True)
+                      _CACHED_POOL = compact_pool
+                      return _CACHED_POOL, sent_uuids, cycle
+
+              if cache_path.exists():
+                  try:
+                      cached = json.loads(gzip.decompress(cache_path.read_bytes()).decode("utf-8"))
+                      if isinstance(cached, list) and cached:
+                          compact_pool = [x for x in cached if _is_valid_entry(x)]
+                          if compact_pool:
+                              print(f"[QuoteFetcher] Loaded quote-state backup cache: {len(compact_pool)} entries", flush=True)
+                              _CACHED_POOL = compact_pool
+                              return _CACHED_POOL, sent_uuids, cycle
+                  except Exception as e:
+                      print(f"[QuoteFetcher] Backup cache load err: {e}", flush=True)
+
+              return [], sent_uuids, cycle
+
+          def _record_confirmed_uuid(chosen_uuid):
+              if not chosen_uuid:
+                  return
+              if os.environ.get("EVENT_NAME") == "workflow_dispatch" and os.environ.get("IS_DRY_RUN") == "true":
+                  return
+              out_dir = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out"))
+              out_dir.mkdir(parents=True, exist_ok=True)
+              delta_path = out_dir / "state_delta.json"
+              delta = {"newly_sent": [], "reset_cycle": None}
+              if delta_path.exists():
+                  try:
+                      delta = json.loads(delta_path.read_text(encoding="utf-8"))
+                  except Exception:
+                      pass
+              if chosen_uuid not in delta["newly_sent"]:
+                  delta["newly_sent"].append(chosen_uuid)
+              delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
+
+          def _mark_cycle_reset(new_cycle):
+              out_dir = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out"))
+              out_dir.mkdir(parents=True, exist_ok=True)
+              delta_path = out_dir / "state_delta.json"
+              delta = {"newly_sent": [], "reset_cycle": None}
+              if delta_path.exists():
+                  try:
+                      delta = json.loads(delta_path.read_text(encoding="utf-8"))
+                  except Exception:
+                      pass
+              delta["reset_cycle"] = new_cycle
+              delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
+
+          def _fetch_quote():
+              import urllib.request as _req
+
+              rng = random.SystemRandom()
+              pool, sent_uuids, cycle = _load_pool_and_state()
+              if pool:
+                  delta_path = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out")) / "state_delta.json"
+                  if delta_path.exists():
+                      try:
+                          delta = json.loads(delta_path.read_text(encoding="utf-8"))
+                          if delta.get("reset_cycle"):
+                              sent_uuids = set(delta.get("newly_sent") or [])
+                              cycle = int(delta["reset_cycle"])
+                      except Exception:
+                          pass
+
+                  available = [
+                      e for e in pool
+                      if e.get("u") not in sent_uuids
+                      and e.get("u") not in _SESSION_USED_UUIDS
+                      and _format_entry(e) not in _SESSION_USED_TEXTS
+                  ]
+                  if not available:
+                      cycle += 1
+                      sent_uuids.clear()
+                      _mark_cycle_reset(cycle)
+                      available = [
+                          e for e in pool
+                          if e.get("u") not in _SESSION_USED_UUIDS
+                          and _format_entry(e) not in _SESSION_USED_TEXTS
+                      ] or pool
+                      print(f"[QuoteFetcher] Full pool completed! Starting cycle #{cycle} ({len(available)} entries)", flush=True)
+
+                  chosen = rng.choice(available)
+                  text = _format_entry(chosen)
+                  chosen_uuid = chosen.get("u")
+                  if chosen_uuid:
+                      _SESSION_USED_UUIDS.add(chosen_uuid)
+                  _SESSION_USED_TEXTS.add(text)
+                  print(f"[QuoteFetcher] Pool ({chosen.get('t')}, remaining {len(available)-1}/{len(pool)}, cycle {cycle}) -> {text}", flush=True)
+                  return text, chosen_uuid
+
+              # Ultimate online API fallback (weighted d=88%, k=12%, passing exact same filters)
+              headers = {"User-Agent": _CLEAN_UA}
+              for _ in range(4):
+                  cat = "d" if rng.random() < 0.88 else "k"
+                  try:
+                      r = _req.Request(f"https://v1.hitokoto.cn/?c={cat}&max_length=100", headers=headers)
+                      with _req.urlopen(r, timeout=2.5) as resp:
+                          data = json.loads(resp.read().decode("utf-8"))
+                          if _is_valid_entry(data):
+                              text = _format_entry(data)
+                              if text not in _SESSION_USED_TEXTS:
+                                  _SESSION_USED_TEXTS.add(text)
+                                  uid = data.get("uuid")
+                                  if uid:
+                                      _SESSION_USED_UUIDS.add(uid)
+                                  print(f"[QuoteFetcher] Hitokoto-API ({cat}) -> {text}", flush=True)
+                                  return text, uid
+                  except Exception as e:
+                      print(f"[QuoteFetcher] Hitokoto-API err ({type(e).__name__})", flush=True)
+
+              # Curated pure modern Chinese literary & philosophical fallback pool (no English, no poetry, <=100 chars)
+              fallback_pool = [
+                  "去热爱生活，去奔赴山海 —— 《人民日报》",
+                  "生活原本沉闷，但跑起来就有风 —— 《平凡的世界》",
+                  "日落尤其温柔，人间皆是浪漫 —— 现代随笔",
+                  "春来夏往，秋收冬藏，我们来日方长 —— 汪曾祺",
+                  "满怀希望，就会所向披靡 —— 巫哲《撒野》",
+                  "生活明朗，万物可爱，人间值得，未来可期 —— 季羡林",
+                  "把细碎的日子过成诗，简单且温暖 —— 简媜",
+                  "心有繁花，一路生香 —— 泰戈尔",
+                  "你当像鸟飞往你的山 —— 塔拉·韦斯特弗",
+                  "且将新火试新茶，不必太匆忙 —— 现代随笔",
+                  "人闲下来的时候，最能感受到时间温柔的流逝 —— 散文随笔",
+                  "年长者最大的修养就是控制住批评年轻人的欲望 —— 毛姆《月亮与六便士》",
+                  "幸福始终充满着缺陷 —— 爱丽丝·门罗",
+                  "只有真正认识自己的人，才能看清自己真正想要的生活 —— 现代哲思",
+                  "不要为了别人的期待而轻易改变自己内心的节奏 —— 散文随笔",
+                  "每天都给自己留一点安静独处的时间，心里才不会慌张 —— 现代随笔",
+                  "真正重要的事情往往需要一点耐心去慢慢等待 —— 生活感悟",
+                  "凡事尽量往好处看，日子自然也会变得轻盈起来 —— 治愈系语录",
+                  "保持清醒，保持善良，也保持对平凡生活的欢喜 —— 现代随笔",
+                  "与其焦虑未来还没有发生的事，不如先把眼前的一天过好 —— 生活感悟",
+              ]
+              candidates = [x for x in fallback_pool if x not in _SESSION_USED_TEXTS] or fallback_pool
+              fb = rng.choice(candidates)
+              _SESSION_USED_TEXTS.add(fb)
+              print(f"[QuoteFetcher] CuratedFallback -> {fb}", flush=True)
+              return fb, None
+
           def _install_humanized_sender_hook():
               try:
                   import app.sender as _sender
                   from app.douyin import PageOperationError
               except ImportError:
                   return
-
-              def _clean_text(s):
-                  if not s:
-                      return ""
-                  s = re.sub(r"\s+", " ", s).strip()
-                  for ch in ("\u201c", "\u201d", "\"", "\u300c", "\u300d", "\u300e", "\u300f"):
-                      s = s.strip(ch)
-                  return s.strip()
-
-              def _format_author(who, frm):
-                  who = (who or "").strip()
-                  frm = (frm or "").strip()
-                  if who in ("null", "None", "\u4f5a\u540d"):
-                      who = ""
-                  if frm in ("null", "None", "\u539f\u521b", "\u7f51\u7edc", "\u4e00\u4e2a\u9ad8\u4e09"):
-                      frm = ""
-                  for ch in ("\u300a", "\u300b", "<", ">"):
-                      if frm.startswith(ch) and frm.endswith(ch):
-                          frm = frm[1:-1].strip()
-                      if who.startswith(ch) and who.endswith(ch):
-                          who = who[1:-1].strip()
-                  if who and frm and who != frm:
-                      return f"{who}\u300a{frm}\u300b"
-                  return who or frm
-
-              def _fetch_quote():
-                  import urllib.request as _req
-                  import json as _json
-
-                  timeout = 2.5
-                  headers = {"User-Agent": _CLEAN_UA}
-
-                  try:
-                      r = _req.Request("https://v1.hitokoto.cn/?c=d&c=i&c=k&max_length=100", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          h = _clean_text(data.get("hitokoto", ""))
-                          auth = _clean_text(_format_author(data.get("from_who"), data.get("from")))
-                          if auth:
-                              for ch in ("\u3002", "\uff01", "!", "."):
-                                  if h.endswith(ch):
-                                      h = h[:-1]
-                              text = f"{h} \u2014\u2014 {auth}"
-                          else:
-                              text = h
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] Hitokoto -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] Hitokoto err ({type(e).__name__}), fallback to P2", flush=True)
-
-                  try:
-                      r = _req.Request("https://api.xygeng.cn/one", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          d = data.get("data")
-                          raw = (d.get("content") if isinstance(d, dict) else "") or ""
-                          text = _clean_text(raw)
-                          if isinstance(d, dict):
-                              auth = _clean_text(_format_author(d.get("name"), d.get("origin")))
-                              if auth:
-                                  for ch in ("\u3002", "\uff01", "!", "."):
-                                      if text.endswith(ch):
-                                          text = text[:-1]
-                                  text = f"{text} \u2014\u2014 {auth}"
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] xygeng -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] xygeng err ({type(e).__name__}), fallback to P3", flush=True)
-
-                  try:
-                      r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          text = _clean_text(resp.read().decode("utf-8"))
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] SweetNothings -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P4", flush=True)
-
-                  try:
-                      r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
-                      with _req.urlopen(r, timeout=timeout) as resp:
-                          data = _json.loads(resp.read().decode("utf-8"))
-                          zh = _clean_text(data.get("note", ""))
-                          en = _clean_text(data.get("content", ""))
-                          text = f"{en}\uff08{zh}\uff09" if (en and zh and len(en) + len(zh) + 2 <= 100) else (zh or en)
-                          if len(text) > 100:
-                              text = text[:97] + "..."
-                          if text:
-                              print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
-                              return text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] Iciba err ({type(e).__name__}), fallback to local pool", flush=True)
-
-                  fallback_pool = [
-                      "\u53bb\u70ed\u7231\u751f\u6d3b\uff0c\u53bb\u5954\u8d74\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4eba\u6c11\u65e5\u62a5\u300b",
-                      "\u613f\u4f60\u5386\u5c3d\u5343\u5e06\uff0c\u5f52\u6765\u4ecd\u662f\u5c11\u5e74\u3002 \u2014\u2014 \u51af\u5510",
-                      "\u751f\u6d3b\u539f\u672c\u6c89\u95f7\uff0c\u4f46\u8dd1\u8d77\u6765\u5c31\u6709\u98ce\u3002 \u2014\u2014 \u300a\u5e73\u51e1\u7684\u4e16\u754c\u300b",
-                      "\u65e5\u843d\u5c24\u5176\u6e29\u67d4\uff0c\u4eba\u95f4\u7686\u662f\u6d6a\u6f2b\u3002 \u2014\u2014 \u73b0\u4ee3\u968f\u7b14",
-                      "\u77e5\u8db3\u4e14\u4e0a\u8fdb\uff0c\u6e29\u67d4\u4e14\u575a\u5b9a\u3002 \u2014\u2014 \u6cbb\u6108\u7cfb\u8bed\u5f55",
-                      "\u6625\u6765\u590f\u5f80\uff0c\u79cb\u6536\u51ac\u85cf\uff0c\u6211\u4eec\u6765\u65e5\u65b9\u957f\u3002 \u2014\u2014 \u6c6a\u66fe\u797a",
-                      "\u6ee1\u6000\u5e0c\u671b\uff0c\u5c31\u4f1a\u6240\u5411\u62ab\u9761\u3002 \u2014\u2014 \u5deb\u54f2",
-                      "\u751f\u6d3b\u660e\u6717\uff0c\u4e07\u7269\u53ef\u7231\uff0c\u4eba\u95f4\u503c\u5f97\uff0c\u672a\u6765\u53ef\u671f\u3002 \u2014\u2014 \u5b63\u7fa1\u6797",
-                      "\u4fdd\u6301\u70ed\u7231\uff0c\u5954\u8d74\u4e0b\u4e00\u573a\u5c71\u6d77\u3002 \u2014\u2014 \u300a\u4e2d\u56fd\u56fd\u5bb6\u5730\u7406\u300b",
-                      "\u628a\u7ec6\u788e\u7684\u65e5\u5b50\u8fc7\u6210\u8bd7\uff0c\u7b80\u5355\u4e14\u6e29\u6696\u3002 \u2014\u2014 \u7b80\u5a9c",
-                      "\u8ffd\u5149\u7684\u4eba\uff0c\u7ec8\u4f1a\u4e07\u4e08\u5149\u8292\u3002 \u2014\u2014 \u7ecf\u5178\u52b1\u5fd7\u8bed\u5f55",
-                      "\u5fc3\u6709\u7e41\u82b1\uff0c\u4e00\u8def\u751f\u9999\u3002 \u2014\u2014 \u6cf0\u6208\u5c14"
-                  ]
-                  fb = random.choice(fallback_pool)
-                  print(f"[QuoteFetcher] fallback -> {fb}", flush=True)
-                  return fb
 
               _orig_send_message = _sender.send_message
 
@@ -402,21 +633,25 @@ jobs:
                       trigger_pattern = re.compile(r"\[(?:API|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5)\]|\bAPI\b|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5")
                       exact_matches = ("\u4e00\u8a00", "\u91d1\u53e5", "\u6bcf\u65e5\u4e00\u53e5", "API", "api", "[\u4e00\u8a00]", "[\u91d1\u53e5]", "[\u6bcf\u65e5\u4e00\u53e5]", "[API]")
                       if v_stripped in exact_matches or trigger_pattern.search(val):
-                          q = _clean_text(_fetch_quote())
+                          q, chosen_uuid = _fetch_quote()
+                          q = _clean_text(q)
                           if v_stripped in exact_matches:
                               val = q
                           else:
                               val = _clean_text(trigger_pattern.sub(lambda _: q, val, count=1))
                           if len(val) > 100:
-                              val = val[:97] + "..."
+                              val = _clean_text(val[:100])
+                          if chosen_uuid:
+                              _PENDING_UUIDS[val] = chosen_uuid
                           message = type(message)(type="text", content=val)
                           print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
                   content = _clean_text(content)
+                  chosen_uuid = _PENDING_UUIDS.pop(content, None)
                   if len(content) > 100:
-                      content = content[:97] + "..."
+                      content = content[:100]
                   editor = await chat.message_input()
                   page = editor.page
                   await editor.click()
@@ -451,6 +686,7 @@ jobs:
                   await _sender._trigger_send(page)
                   try:
                       await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
+                      _record_confirmed_uuid(chosen_uuid)
                   except PageOperationError as exc:
                       if "\u9875\u9762\u63d0\u793a\u53ef\u4ee5\u91cd\u8bd5" in str(exc):
                           print("[HumanizeHook] Detected red exclamation mark, attempting click retry...", flush=True)
@@ -459,6 +695,7 @@ jobs:
                               latest = page.locator(_sender.LATEST_OUTGOING_MESSAGE).first
                               await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
                               print("[HumanizeHook] Retry click succeeded!", flush=True)
+                              _record_confirmed_uuid(chosen_uuid)
                               return
                       raise
 
@@ -504,6 +741,85 @@ jobs:
         if: always()
         run: |
           pkill -f "/tmp/xray/xray" || true
+
+      - name: Persist quote-state branch (回写已发防重记录)
+        if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run == true || inputs.dry_run == 'true'))
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          STATE_DIR="/tmp/quote_state"
+          OUT_DIR="/tmp/quote_state_out"
+          if [ ! -d "$STATE_DIR/.git" ]; then
+            echo "未找到 quote-state 仓库目录，跳过写回"
+            exit 0
+          fi
+
+          if [ ! -f "$OUT_DIR/state_delta.json" ] && [ ! -f "$OUT_DIR/pool_cache.json.gz" ]; then
+            echo "本次无新增已发记录与词库更新，跳过提交"
+            exit 0
+          fi
+
+          python -I - <<'PY'
+          import json
+          import shutil
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          state_dir = Path("/tmp/quote_state")
+          out_dir = Path("/tmp/quote_state_out")
+
+          sent_path = state_dir / "sent.json"
+          state = {"version": 1, "cycle": 1, "sent_uuids": [], "updated_at": ""}
+          if sent_path.exists():
+              try:
+                  loaded = json.loads(sent_path.read_text(encoding="utf-8"))
+                  if isinstance(loaded, dict):
+                      state.update(loaded)
+              except Exception:
+                  pass
+
+          delta_path = out_dir / "state_delta.json"
+          if delta_path.exists():
+              delta = json.loads(delta_path.read_text(encoding="utf-8"))
+              newly = [u for u in (delta.get("newly_sent") or []) if u]
+              if delta.get("reset_cycle"):
+                  state["cycle"] = int(delta["reset_cycle"])
+                  state["sent_uuids"] = newly
+              else:
+                  existing = list(state.get("sent_uuids") or [])
+                  seen = set(existing)
+                  for u in newly:
+                      if u not in seen:
+                          existing.append(u)
+                          seen.add(u)
+                  state["sent_uuids"] = existing
+              state["updated_at"] = datetime.now(timezone.utc).isoformat()
+              sent_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+          new_pool = out_dir / "pool_cache.json.gz"
+          if new_pool.exists():
+              shutil.copyfile(new_pool, state_dir / "pool_cache.json.gz")
+          PY
+
+          if [ -z "$(git -C "$STATE_DIR" status --porcelain)" ]; then
+            echo "quote-state 无实际文件变化，跳过推送"
+            exit 0
+          fi
+
+          git -C "$STATE_DIR" config user.name "github-actions[bot]"
+          git -C "$STATE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$STATE_DIR" add sent.json pool_cache.json.gz 2>/dev/null || git -C "$STATE_DIR" add -A
+          git -C "$STATE_DIR" commit -q -m "chore(quote-state): record sent quotes ($(date -u +%Y-%m-%d))"
+          REMOTE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          if ! git -C "$STATE_DIR" push -q "$REMOTE_URL" HEAD:quote-state; then
+            git -C "$STATE_DIR" pull --rebase -q "$REMOTE_URL" quote-state || true
+            git -C "$STATE_DIR" push -q "$REMOTE_URL" HEAD:quote-state
+          fi
+          echo "quote-state 已安全同步至远端分支！"
 
       - name: Encrypt diagnostics artifacts (7-Zip AES-256)
         if: failure()
