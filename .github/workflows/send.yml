@@ -206,7 +206,13 @@ jobs:
           import asyncio
           import random
           import re
+          from datetime import datetime
           from pathlib import Path
+
+          try:
+              from zoneinfo import ZoneInfo
+          except ImportError:
+              ZoneInfo = None
 
           _CLEAN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -245,8 +251,9 @@ jobs:
           )
 
           _SESSION_USED_UUIDS = set()
+          _SESSION_USED_BODIES = set()
           _SESSION_USED_TEXTS = set()
-          _PENDING_UUIDS = {}
+          _PENDING_QUOTES = {}
           _CACHED_POOL = None
 
           def _install_playwright_proxy_hook():
@@ -341,6 +348,10 @@ jobs:
                   s = s.strip(ch)
               return s.strip()
 
+          def _normalize_body(s):
+              s = _clean_text(s)
+              return re.sub(r"[。！!?？；;.,，、\s]+", "", s)
+
           def _format_author(who, frm):
               who = (who or "").strip()
               frm = (frm or "").strip()
@@ -376,11 +387,13 @@ jobs:
               formatted = _format_entry(entry)
               if not formatted or len(formatted) > 100:
                   return False
+              # Reject Japanese kana & Korean hangul
               if re.search(r"[\u3040-\u30ff\uac00-\ud7af]", raw_h):
                   return False
+              # Allow bilingual (foreign + Chinese translation), reject pure foreign & short foreign battle cries
               cjk = len(re.findall(r"[\u4e00-\u9fff]", raw_h))
               ascii_letters = sum(1 for c in raw_h if ("a" <= c <= "z") or ("A" <= c <= "Z"))
-              if cjk < 4 or ascii_letters > cjk:
+              if cjk < 4 or (ascii_letters >= 8 and cjk < 6):
                   return False
               who = (entry.get("from_who") if "from_who" in entry else entry.get("w")) or ""
               frm = (entry.get("from") if "from" in entry else entry.get("f")) or ""
@@ -423,6 +436,28 @@ jobs:
                       print(f"[QuoteFetcher] Bundle {cat} err from {url.split('/')[2]}: {type(e).__name__}", flush=True)
               return None
 
+          def _parse_sent_state(st):
+              sent_uuids = set()
+              sent_bodies = set()
+              cycle = 1
+              if not isinstance(st, dict):
+                  return sent_uuids, sent_bodies, cycle
+              cycle = int(st.get("cycle") or 1)
+              for u in (st.get("sent_uuids") or []):
+                  if isinstance(u, str) and u:
+                      sent_uuids.add(u)
+              for item in (st.get("sent") or []):
+                  if isinstance(item, dict):
+                      u = item.get("uuid")
+                      t = item.get("text") or ""
+                      if u:
+                          sent_uuids.add(u)
+                      if t:
+                          b = _normalize_body(t.split(" —— ")[0])
+                          if len(b) >= 4:
+                              sent_bodies.add(b)
+              return sent_uuids, sent_bodies, cycle
+
           def _load_pool_and_state():
               global _CACHED_POOL
               state_dir = Path(os.environ.get("QUOTE_STATE_DIR", "/tmp/quote_state"))
@@ -430,34 +465,33 @@ jobs:
               out_dir.mkdir(parents=True, exist_ok=True)
 
               sent_uuids = set()
+              sent_bodies = set()
               cycle = 1
               sent_path = state_dir / "sent.json"
               if sent_path.exists():
                   try:
                       st = json.loads(sent_path.read_text(encoding="utf-8"))
-                      if isinstance(st, dict):
-                          sent_uuids = set(st.get("sent_uuids") or [])
-                          cycle = int(st.get("cycle") or 1)
+                      sent_uuids, sent_bodies, cycle = _parse_sent_state(st)
                   except Exception as e:
                       print(f"[QuoteFetcher] Warning reading sent.json: {e}", flush=True)
 
               if _CACHED_POOL is not None:
-                  return _CACHED_POOL, sent_uuids, cycle
+                  return _CACHED_POOL, sent_uuids, sent_bodies, cycle
 
               cache_path = state_dir / "pool_cache.json.gz"
               d_raw = _load_bundle_category("d")
               k_raw = _load_bundle_category("k")
 
               if d_raw is not None and k_raw is not None:
-                  seen_fmt = set()
+                  seen_body = set()
                   compact_pool = []
                   for x in d_raw + k_raw:
                       if not _is_valid_entry(x):
                           continue
-                      fmt = _format_entry(x)
-                      if fmt in seen_fmt:
+                      bkey = _normalize_body(x.get("hitokoto") or "")
+                      if bkey in seen_body:
                           continue
-                      seen_fmt.add(fmt)
+                      seen_body.add(bkey)
                       compact_pool.append({
                           "u": x.get("uuid") or "",
                           "h": x.get("hitokoto") or "",
@@ -479,7 +513,7 @@ jobs:
                       else:
                           print(f"[QuoteFetcher] Loaded live d+k pool ({len(compact_pool)} entries, cache up-to-date)", flush=True)
                       _CACHED_POOL = compact_pool
-                      return _CACHED_POOL, sent_uuids, cycle
+                      return _CACHED_POOL, sent_uuids, sent_bodies, cycle
 
               if cache_path.exists():
                   try:
@@ -489,14 +523,22 @@ jobs:
                           if compact_pool:
                               print(f"[QuoteFetcher] Loaded quote-state backup cache: {len(compact_pool)} entries", flush=True)
                               _CACHED_POOL = compact_pool
-                              return _CACHED_POOL, sent_uuids, cycle
+                              return _CACHED_POOL, sent_uuids, sent_bodies, cycle
                   except Exception as e:
                       print(f"[QuoteFetcher] Backup cache load err: {e}", flush=True)
 
-              return [], sent_uuids, cycle
+              return [], sent_uuids, sent_bodies, cycle
 
-          def _record_confirmed_uuid(chosen_uuid):
-              if not chosen_uuid:
+          def _beijing_date_str():
+              if ZoneInfo is not None:
+                  try:
+                      return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+                  except Exception:
+                      pass
+              return datetime.now().date().isoformat()
+
+          def _record_confirmed_quote(chosen_uuid, sent_text):
+              if not chosen_uuid or not sent_text:
                   return
               if os.environ.get("EVENT_NAME") == "workflow_dispatch" and os.environ.get("IS_DRY_RUN") == "true":
                   return
@@ -509,8 +551,13 @@ jobs:
                       delta = json.loads(delta_path.read_text(encoding="utf-8"))
                   except Exception:
                       pass
-              if chosen_uuid not in delta["newly_sent"]:
-                  delta["newly_sent"].append(chosen_uuid)
+              existing_u = {item.get("uuid") for item in delta.get("newly_sent", []) if isinstance(item, dict)}
+              if chosen_uuid not in existing_u:
+                  delta.setdefault("newly_sent", []).append({
+                      "uuid": chosen_uuid,
+                      "text": sent_text,
+                      "date": _beijing_date_str(),
+                  })
               delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
 
           def _mark_cycle_reset(new_cycle):
@@ -530,14 +577,15 @@ jobs:
               import urllib.request as _req
 
               rng = random.SystemRandom()
-              pool, sent_uuids, cycle = _load_pool_and_state()
+              pool, sent_uuids, sent_bodies, cycle = _load_pool_and_state()
               if pool:
                   delta_path = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out")) / "state_delta.json"
                   if delta_path.exists():
                       try:
                           delta = json.loads(delta_path.read_text(encoding="utf-8"))
                           if delta.get("reset_cycle"):
-                              sent_uuids = set(delta.get("newly_sent") or [])
+                              sent_uuids = {item.get("uuid") for item in (delta.get("newly_sent") or []) if isinstance(item, dict) and item.get("uuid")}
+                              sent_bodies = {_normalize_body((item.get("text") or "").split(" —— ")[0]) for item in (delta.get("newly_sent") or []) if isinstance(item, dict) and item.get("text")}
                               cycle = int(delta["reset_cycle"])
                       except Exception:
                           pass
@@ -545,16 +593,20 @@ jobs:
                   available = [
                       e for e in pool
                       if e.get("u") not in sent_uuids
+                      and _normalize_body(e.get("h") or "") not in sent_bodies
                       and e.get("u") not in _SESSION_USED_UUIDS
+                      and _normalize_body(e.get("h") or "") not in _SESSION_USED_BODIES
                       and _format_entry(e) not in _SESSION_USED_TEXTS
                   ]
                   if not available:
                       cycle += 1
                       sent_uuids.clear()
+                      sent_bodies.clear()
                       _mark_cycle_reset(cycle)
                       available = [
                           e for e in pool
                           if e.get("u") not in _SESSION_USED_UUIDS
+                          and _normalize_body(e.get("h") or "") not in _SESSION_USED_BODIES
                           and _format_entry(e) not in _SESSION_USED_TEXTS
                       ] or pool
                       print(f"[QuoteFetcher] Full pool completed! Starting cycle #{cycle} ({len(available)} entries)", flush=True)
@@ -564,11 +616,12 @@ jobs:
                   chosen_uuid = chosen.get("u")
                   if chosen_uuid:
                       _SESSION_USED_UUIDS.add(chosen_uuid)
+                  _SESSION_USED_BODIES.add(_normalize_body(chosen.get("h") or ""))
                   _SESSION_USED_TEXTS.add(text)
                   print(f"[QuoteFetcher] Pool ({chosen.get('t')}, remaining {len(available)-1}/{len(pool)}, cycle {cycle}) -> {text}", flush=True)
-                  return text, chosen_uuid
+                  return text, chosen_uuid, text
 
-              # Ultimate online API fallback (weighted d=88%, k=12%, passing exact same filters)
+              # Fallback P3: Filtered Hitokoto single API (d=88%, k=12%)
               headers = {"User-Agent": _CLEAN_UA}
               for _ in range(4):
                   cat = "d" if rng.random() < 0.88 else "k"
@@ -578,17 +631,39 @@ jobs:
                           data = json.loads(resp.read().decode("utf-8"))
                           if _is_valid_entry(data):
                               text = _format_entry(data)
-                              if text not in _SESSION_USED_TEXTS:
+                              bkey = _normalize_body(data.get("hitokoto") or "")
+                              uid = data.get("uuid")
+                              if text not in _SESSION_USED_TEXTS and bkey not in _SESSION_USED_BODIES:
                                   _SESSION_USED_TEXTS.add(text)
-                                  uid = data.get("uuid")
+                                  _SESSION_USED_BODIES.add(bkey)
                                   if uid:
                                       _SESSION_USED_UUIDS.add(uid)
                                   print(f"[QuoteFetcher] Hitokoto-API ({cat}) -> {text}", flush=True)
-                                  return text, uid
+                                  return text, uid, text
                   except Exception as e:
                       print(f"[QuoteFetcher] Hitokoto-API err ({type(e).__name__})", flush=True)
 
-              # Curated pure modern Chinese literary & philosophical fallback pool (no English, no poetry, <=100 chars)
+              # Fallback P4: Iciba bilingual API (en + zh <= 100 chars, or pure Chinese zh <= 100 chars; no truncation)
+              try:
+                  r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
+                  with _req.urlopen(r, timeout=2.5) as resp:
+                      data = json.loads(resp.read().decode("utf-8"))
+                      zh = _clean_text(data.get("note", ""))
+                      en = _clean_text(data.get("content", ""))
+                      bilingual = f"{en}\uff08{zh}\uff09" if (en and zh) else ""
+                      text = ""
+                      if bilingual and len(bilingual) <= 100:
+                          text = bilingual
+                      elif zh and len(zh) <= 100 and len(re.findall(r"[\u4e00-\u9fff]", zh)) >= 4:
+                          text = zh
+                      if text and text not in _SESSION_USED_TEXTS:
+                          _SESSION_USED_TEXTS.add(text)
+                          print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
+                          return text, None, None
+              except Exception as e:
+                  print(f"[QuoteFetcher] Iciba err ({type(e).__name__}), fallback to local pool", flush=True)
+
+              # Fallback P5: Curated pure modern Chinese literary & philosophical fallback pool (<=100 chars)
               fallback_pool = [
                   "去热爱生活，去奔赴山海 —— 《人民日报》",
                   "生活原本沉闷，但跑起来就有风 —— 《平凡的世界》",
@@ -615,7 +690,7 @@ jobs:
               fb = rng.choice(candidates)
               _SESSION_USED_TEXTS.add(fb)
               print(f"[QuoteFetcher] CuratedFallback -> {fb}", flush=True)
-              return fb, None
+              return fb, None, None
 
           def _install_humanized_sender_hook():
               try:
@@ -633,7 +708,7 @@ jobs:
                       trigger_pattern = re.compile(r"\[(?:API|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5)\]|\bAPI\b|\u4e00\u8a00|\u91d1\u53e5|\u6bcf\u65e5\u4e00\u53e5")
                       exact_matches = ("\u4e00\u8a00", "\u91d1\u53e5", "\u6bcf\u65e5\u4e00\u53e5", "API", "api", "[\u4e00\u8a00]", "[\u91d1\u53e5]", "[\u6bcf\u65e5\u4e00\u53e5]", "[API]")
                       if v_stripped in exact_matches or trigger_pattern.search(val):
-                          q, chosen_uuid = _fetch_quote()
+                          q, chosen_uuid, raw_quote_text = _fetch_quote()
                           q = _clean_text(q)
                           if v_stripped in exact_matches:
                               val = q
@@ -642,14 +717,14 @@ jobs:
                           if len(val) > 100:
                               val = _clean_text(val[:100])
                           if chosen_uuid:
-                              _PENDING_UUIDS[val] = chosen_uuid
+                              _PENDING_QUOTES[val] = (chosen_uuid, raw_quote_text or val)
                           message = type(message)(type="text", content=val)
                           print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
                   content = _clean_text(content)
-                  chosen_uuid = _PENDING_UUIDS.pop(content, None)
+                  pending_info = _PENDING_QUOTES.pop(content, None)
                   if len(content) > 100:
                       content = content[:100]
                   editor = await chat.message_input()
@@ -686,7 +761,8 @@ jobs:
                   await _sender._trigger_send(page)
                   try:
                       await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
-                      _record_confirmed_uuid(chosen_uuid)
+                      if pending_info:
+                          _record_confirmed_quote(pending_info[0], pending_info[1])
                   except PageOperationError as exc:
                       if "\u9875\u9762\u63d0\u793a\u53ef\u4ee5\u91cd\u8bd5" in str(exc):
                           print("[HumanizeHook] Detected red exclamation mark, attempting click retry...", flush=True)
@@ -695,7 +771,8 @@ jobs:
                               latest = page.locator(_sender.LATEST_OUTGOING_MESSAGE).first
                               await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
                               print("[HumanizeHook] Retry click succeeded!", flush=True)
-                              _record_confirmed_uuid(chosen_uuid)
+                              if pending_info:
+                                  _record_confirmed_quote(pending_info[0], pending_info[1])
                               return
                       raise
 
@@ -765,6 +842,7 @@ jobs:
 
           python -I - <<'PY'
           import json
+          import re
           import shutil
           from datetime import datetime, timezone
           from pathlib import Path
@@ -772,31 +850,51 @@ jobs:
           state_dir = Path("/tmp/quote_state")
           out_dir = Path("/tmp/quote_state_out")
 
+          def _norm_body(txt):
+              t = re.sub(r"\s+", " ", (txt or "").split(" —— ")[0]).strip()
+              for ch in ("“", "”", '"', "「", "」", "『", "』"):
+                  t = t.strip(ch)
+              return re.sub(r"[。！!?？；;.,，、\s]+", "", t)
+
           sent_path = state_dir / "sent.json"
-          state = {"version": 1, "cycle": 1, "sent_uuids": [], "updated_at": ""}
+          state = {"version": 1, "cycle": 1, "updated_at": "", "sent": []}
           if sent_path.exists():
               try:
                   loaded = json.loads(sent_path.read_text(encoding="utf-8"))
                   if isinstance(loaded, dict):
-                      state.update(loaded)
+                      state["version"] = int(loaded.get("version") or 1)
+                      state["cycle"] = int(loaded.get("cycle") or 1)
+                      if isinstance(loaded.get("sent"), list):
+                          state["sent"] = loaded["sent"]
+                      elif isinstance(loaded.get("sent_uuids"), list):
+                          state["sent"] = [{"uuid": u, "text": "", "date": ""} for u in loaded["sent_uuids"] if u]
               except Exception:
                   pass
 
           delta_path = out_dir / "state_delta.json"
           if delta_path.exists():
               delta = json.loads(delta_path.read_text(encoding="utf-8"))
-              newly = [u for u in (delta.get("newly_sent") or []) if u]
+              newly = [item for item in (delta.get("newly_sent") or []) if isinstance(item, dict) and item.get("uuid")]
               if delta.get("reset_cycle"):
                   state["cycle"] = int(delta["reset_cycle"])
-                  state["sent_uuids"] = newly
+                  state["sent"] = newly
               else:
-                  existing = list(state.get("sent_uuids") or [])
-                  seen = set(existing)
-                  for u in newly:
-                      if u not in seen:
-                          existing.append(u)
-                          seen.add(u)
-                  state["sent_uuids"] = existing
+                  existing = list(state.get("sent") or [])
+                  seen_u = {x.get("uuid") for x in existing if isinstance(x, dict) and x.get("uuid")}
+                  seen_b = {_norm_body(x.get("text") or "") for x in existing if isinstance(x, dict) and x.get("text")}
+                  for item in newly:
+                      u = item.get("uuid")
+                      b = _norm_body(item.get("text") or "")
+                      if u not in seen_u and (not b or b not in seen_b):
+                          existing.append({
+                              "uuid": u,
+                              "text": item.get("text") or "",
+                              "date": item.get("date") or "",
+                          })
+                          seen_u.add(u)
+                          if b:
+                              seen_b.add(b)
+                  state["sent"] = existing
               state["updated_at"] = datetime.now(timezone.utc).isoformat()
               sent_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
