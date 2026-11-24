@@ -254,6 +254,7 @@ jobs:
           _SESSION_USED_BODIES = set()
           _SESSION_USED_TEXTS = set()
           _PENDING_QUOTES = {}
+          _PENDING_CYCLE_RESETS = {}
           _CACHED_POOL = None
 
           def _install_playwright_proxy_hook():
@@ -340,17 +341,43 @@ jobs:
               except ImportError:
                   pass
 
+          def _strip_paired(text, pairs):
+              changed = True
+              while changed and len(text) >= 2:
+                  changed = False
+                  for left, right in pairs:
+                      if text.startswith(left) and text.endswith(right):
+                          inner = text[len(left):len(text) - len(right)]
+                          if left == right:
+                              if left not in inner:
+                                  text = inner.strip()
+                                  changed = True
+                          else:
+                              depth = 0
+                              balanced_outer = True
+                              for idx, ch in enumerate(text):
+                                  if ch == left:
+                                      depth += 1
+                                  elif ch == right:
+                                      depth -= 1
+                                  if depth == 0 and idx < len(text) - 1:
+                                      balanced_outer = False
+                                      break
+                              if balanced_outer and depth == 0:
+                                  text = inner.strip()
+                                  changed = True
+              return text
+
           def _clean_text(s):
               if not s:
                   return ""
               s = re.sub(r"\s+", " ", s).strip()
-              for ch in ("\u201c", "\u201d", "\"", "\u300c", "\u300d", "\u300e", "\u300f"):
-                  s = s.strip(ch)
-              return s.strip()
+              quote_pairs = (("\u201c", "\u201d"), ('"', '"'), ("\u300c", "\u300d"), ("\u300e", "\u300f"))
+              return _strip_paired(s, quote_pairs)
 
           def _normalize_body(s):
               s = _clean_text(s)
-              return re.sub(r"[。！!?？；;.,，、\s]+", "", s)
+              return re.sub(r"[。！!?？；;.,，、“”\"'「」『』\s]+", "", s)
 
           def _format_author(who, frm):
               who = (who or "").strip()
@@ -359,11 +386,9 @@ jobs:
                   who = ""
               if frm in ("null", "None", "\u539f\u521b", "\u7f51\u7edc", "\u4e00\u4e2a\u9ad8\u4e09", "-"):
                   frm = ""
-              for ch in ("\u300a", "\u300b", "<", ">"):
-                  if frm.startswith(ch) and frm.endswith(ch):
-                      frm = frm[1:-1].strip()
-                  if who.startswith(ch) and who.endswith(ch):
-                      who = who[1:-1].strip()
+              bracket_pairs = (("\u300a", "\u300b"), ("<", ">"))
+              frm = _strip_paired(frm, bracket_pairs)
+              who = _strip_paired(who, bracket_pairs)
               if who and frm and who != frm:
                   return f"{who}\u300a{frm}\u300b"
               return who or frm
@@ -540,11 +565,12 @@ jobs:
                       pass
               return datetime.now().date().isoformat()
 
-          def _record_confirmed_quote(chosen_uuid, sent_text):
+          def _record_confirmed_quote(chosen_uuid, sent_text, reset_cycle=None):
               if not chosen_uuid or not sent_text:
                   return
               if os.environ.get("EVENT_NAME") == "workflow_dispatch" and os.environ.get("IS_DRY_RUN") == "true":
                   return
+              effective_reset = reset_cycle if reset_cycle is not None else _PENDING_CYCLE_RESETS.pop(chosen_uuid, None)
               out_dir = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out"))
               out_dir.mkdir(parents=True, exist_ok=True)
               delta_path = out_dir / "state_delta.json"
@@ -561,19 +587,8 @@ jobs:
                       "text": sent_text,
                       "date": _beijing_date_str(),
                   })
-              delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
-
-          def _mark_cycle_reset(new_cycle):
-              out_dir = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out"))
-              out_dir.mkdir(parents=True, exist_ok=True)
-              delta_path = out_dir / "state_delta.json"
-              delta = {"newly_sent": [], "reset_cycle": None}
-              if delta_path.exists():
-                  try:
-                      delta = json.loads(delta_path.read_text(encoding="utf-8"))
-                  except Exception:
-                      pass
-              delta["reset_cycle"] = new_cycle
+              if effective_reset is not None:
+                  delta["reset_cycle"] = effective_reset
               delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
 
           def _fetch_quote():
@@ -601,11 +616,12 @@ jobs:
                       and _normalize_body(e.get("h") or "") not in _SESSION_USED_BODIES
                       and _format_entry(e) not in _SESSION_USED_TEXTS
                   ]
+                  wrapped_cycle = None
                   if not available:
                       cycle += 1
                       sent_uuids.clear()
                       sent_bodies.clear()
-                      _mark_cycle_reset(cycle)
+                      wrapped_cycle = cycle
                       available = [
                           e for e in pool
                           if e.get("u") not in _SESSION_USED_UUIDS
@@ -617,6 +633,8 @@ jobs:
                   chosen = rng.choice(available)
                   text = _format_entry(chosen)
                   chosen_uuid = chosen.get("u")
+                  if chosen_uuid and wrapped_cycle is not None:
+                      _PENDING_CYCLE_RESETS[chosen_uuid] = wrapped_cycle
                   if chosen_uuid:
                       _SESSION_USED_UUIDS.add(chosen_uuid)
                   _SESSION_USED_BODIES.add(_normalize_body(chosen.get("h") or ""))
@@ -756,7 +774,8 @@ jobs:
                           if len(val) > 100:
                               val = _clean_text(val[:100])
                           if chosen_uuid:
-                              _PENDING_QUOTES[val] = (chosen_uuid, raw_quote_text or val)
+                              pending_reset = _PENDING_CYCLE_RESETS.pop(chosen_uuid, None)
+                              _PENDING_QUOTES[val] = (chosen_uuid, raw_quote_text or val, pending_reset)
                           message = type(message)(type="text", content=val)
                           print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
                   return await _orig_send_message(page, chat, message, stickers)
@@ -801,7 +820,7 @@ jobs:
                   try:
                       await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
                       if pending_info:
-                          _record_confirmed_quote(pending_info[0], pending_info[1])
+                          _record_confirmed_quote(pending_info[0], pending_info[1], pending_info[2])
                   except PageOperationError as exc:
                       if "\u9875\u9762\u63d0\u793a\u53ef\u4ee5\u91cd\u8bd5" in str(exc):
                           print("[HumanizeHook] Detected red exclamation mark, attempting click retry...", flush=True)
@@ -811,7 +830,7 @@ jobs:
                               await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
                               print("[HumanizeHook] Retry click succeeded!", flush=True)
                               if pending_info:
-                                  _record_confirmed_quote(pending_info[0], pending_info[1])
+                                  _record_confirmed_quote(pending_info[0], pending_info[1], pending_info[2])
                               return
                       raise
 
@@ -891,9 +910,7 @@ jobs:
 
           def _norm_body(txt):
               t = re.sub(r"\s+", " ", (txt or "").split(" —— ")[0]).strip()
-              for ch in ("“", "”", '"', "「", "」", "『", "』"):
-                  t = t.strip(ch)
-              return re.sub(r"[。！!?？；;.,，、\s]+", "", t)
+              return re.sub(r"[。！!?？；;.,，、“”\"'「」『』\s]+", "", t)
 
           sent_path = state_dir / "sent.json"
           state = {"version": 1, "cycle": 1, "updated_at": "", "sent": []}
