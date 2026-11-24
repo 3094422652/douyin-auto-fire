@@ -378,13 +378,10 @@ jobs:
                   return f"{h} \u2014\u2014 {auth}"
               return h
 
-          def _is_valid_entry(entry):
-              if not isinstance(entry, dict):
-                  return False
-              raw_h = _clean_text(entry.get("hitokoto") or entry.get("h") or "")
+          def _is_clean_content(raw_h, formatted, who="", frm=""):
+              raw_h = _clean_text(raw_h)
               if len(raw_h) < 4:
                   return False
-              formatted = _format_entry(entry)
               if not formatted or len(formatted) > 100:
                   return False
               # Reject Japanese kana & Korean hangul
@@ -395,9 +392,7 @@ jobs:
               ascii_letters = sum(1 for c in raw_h if ("a" <= c <= "z") or ("A" <= c <= "Z"))
               if cjk < 4 or (ascii_letters >= 8 and cjk < 6):
                   return False
-              who = (entry.get("from_who") if "from_who" in entry else entry.get("w")) or ""
-              frm = (entry.get("from") if "from" in entry else entry.get("f")) or ""
-              meta = f"{who} {frm}"
+              meta = f"{who or ''} {frm or ''}"
               for kw in _SOURCE_BLACKLIST:
                   if kw in meta:
                       return False
@@ -409,7 +404,7 @@ jobs:
                   return False
               if ("者" in raw_h and "也" in raw_h) and modern_hits == 0:
                   return False
-              has_mod = any(m in raw_h for m in ("的", "了", "吗", "呢", "吧", "啊", "着", "我", "你", "他", "她", "是", "在", "们", "就", "会", "要", "都", "很", "因为", "所以", "如果", "但是", "虽然", "也许", "生活", "世界", "人生"))
+              has_mod = any(m in raw_h for m in ("的", "了", "吗", "呢", "吧", "啊", "着", "我", "你", "他", "她", "是", "们", "就", "会", "要", "都", "很", "因为", "所以", "如果", "但是", "虽然", "也许", "生活", "世界", "人生")) or bool(re.search(r"在[\u4e00-\u9fff]", raw_h))
               if not has_mod:
                   segs = [re.sub(r"[^\u4e00-\u9fff]", "", s) for s in re.split(r"[，。！？；、,!\?;.\s]+", raw_h)]
                   segs = [s for s in segs if s]
@@ -417,6 +412,14 @@ jobs:
                   if len(segs) >= 2 and len(set(lens)) == 1 and lens[0] in (5, 7):
                       return False
               return True
+
+          def _is_valid_entry(entry):
+              if not isinstance(entry, dict):
+                  return False
+              raw_h = _clean_text(entry.get("hitokoto") or entry.get("h") or "")
+              who = (entry.get("from_who") if "from_who" in entry else entry.get("w")) or ""
+              frm = (entry.get("from") if "from" in entry else entry.get("f")) or ""
+              return _is_clean_content(raw_h, _format_entry(entry), who=who, frm=frm)
 
           def _load_bundle_category(cat, timeout=4.0):
               import urllib.request as _req
@@ -621,7 +624,7 @@ jobs:
                   print(f"[QuoteFetcher] Pool ({chosen.get('t')}, remaining {len(available)-1}/{len(pool)}, cycle {cycle}) -> {text}", flush=True)
                   return text, chosen_uuid, text
 
-              # Fallback P3: Filtered Hitokoto single API (d=88%, k=12%)
+              # Fallback P2: Filtered Hitokoto single API (d=88%, k=12%)
               headers = {"User-Agent": _CLEAN_UA}
               for _ in range(4):
                   cat = "d" if rng.random() < 0.88 else "k"
@@ -643,27 +646,63 @@ jobs:
                   except Exception as e:
                       print(f"[QuoteFetcher] Hitokoto-API err ({type(e).__name__})", flush=True)
 
-              # Fallback P4: Iciba bilingual API (en + zh <= 100 chars, or pure Chinese zh <= 100 chars; no truncation)
+              # Fallback P3: xygeng.cn/one (original fallback P2; no sent.json, filtered <=100 / non-foreign / non-poem)
+              for _ in range(3):
+                  try:
+                      r = _req.Request("https://api.xygeng.cn/one", headers=headers)
+                      with _req.urlopen(r, timeout=2.5) as resp:
+                          data = json.loads(resp.read().decode("utf-8"))
+                          d = data.get("data")
+                          if not isinstance(d, dict):
+                              continue
+                          if "诗" in str(d.get("tag") or ""):
+                              continue
+                          raw = _clean_text(d.get("content") or "")
+                          who = str(d.get("name") or "")
+                          frm = str(d.get("origin") or "")
+                          text = _format_entry({"hitokoto": raw, "from_who": who, "from": frm})
+                          if _is_clean_content(raw, text, who=who, frm=frm) and text not in _SESSION_USED_TEXTS:
+                              _SESSION_USED_TEXTS.add(text)
+                              print(f"[QuoteFetcher] xygeng -> {text}", flush=True)
+                              return text, None, None
+                  except Exception as e:
+                      print(f"[QuoteFetcher] xygeng err ({type(e).__name__}), fallback to P4", flush=True)
+                      break
+
+              # Fallback P4: SweetNothings (original fallback P3; no sent.json, filtered <=100 / non-foreign / non-poem)
+              for _ in range(3):
+                  try:
+                      r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
+                      with _req.urlopen(r, timeout=2.5) as resp:
+                          raw = _clean_text(resp.read().decode("utf-8"))
+                          if raw.startswith(("{", "[")) or "<html" in raw.lower():
+                              continue
+                          if _is_clean_content(raw, raw) and raw not in _SESSION_USED_TEXTS:
+                              _SESSION_USED_TEXTS.add(raw)
+                              print(f"[QuoteFetcher] SweetNothings -> {raw}", flush=True)
+                              return raw, None, None
+                  except Exception as e:
+                      print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P5", flush=True)
+                      break
+
+              # Fallback P5: Iciba bilingual API (original fallback P4; en+zh <= 100 or zh <= 100; no pure EN, no truncation, no sent.json)
               try:
                   r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                   with _req.urlopen(r, timeout=2.5) as resp:
                       data = json.loads(resp.read().decode("utf-8"))
                       zh = _clean_text(data.get("note", ""))
                       en = _clean_text(data.get("content", ""))
-                      bilingual = f"{en}\uff08{zh}\uff09" if (en and zh) else ""
-                      text = ""
-                      if bilingual and len(bilingual) <= 100:
-                          text = bilingual
-                      elif zh and len(zh) <= 100 and len(re.findall(r"[\u4e00-\u9fff]", zh)) >= 4:
-                          text = zh
-                      if text and text not in _SESSION_USED_TEXTS:
-                          _SESSION_USED_TEXTS.add(text)
-                          print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
-                          return text, None, None
+                      if zh and _is_clean_content(zh, zh) and not re.search(r"[\u3040-\u30ff\uac00-\ud7af]", en):
+                          bilingual = f"{en}\uff08{zh}\uff09" if en else ""
+                          text = bilingual if (bilingual and len(bilingual) <= 100) else zh
+                          if len(text) <= 100 and text not in _SESSION_USED_TEXTS:
+                              _SESSION_USED_TEXTS.add(text)
+                              print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
+                              return text, None, None
               except Exception as e:
                   print(f"[QuoteFetcher] Iciba err ({type(e).__name__}), fallback to local pool", flush=True)
 
-              # Fallback P5: Curated pure modern Chinese literary & philosophical fallback pool (<=100 chars)
+              # Fallback P6: Curated pure modern Chinese literary & philosophical fallback pool (<=100 chars)
               fallback_pool = [
                   "去热爱生活，去奔赴山海 —— 《人民日报》",
                   "生活原本沉闷，但跑起来就有风 —— 《平凡的世界》",
