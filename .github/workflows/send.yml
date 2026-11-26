@@ -95,7 +95,7 @@ jobs:
           import os
           from pathlib import Path
 
-          if not any(os.environ.get(f"COOKIE_{i}") for i in range(1, 6)):
+          if not any(os.environ.get(f"COOKIE_{i}") or os.environ.get(f"CONFIG_{i}") for i in range(1, 6)):
               print("未配置多账号 Secret，使用旧单账号模式")
               raise SystemExit(0)
 
@@ -123,8 +123,9 @@ jobs:
               except json.JSONDecodeError as exc:
                   raise SystemExit(f"DOUYIN_CONFIG_ACCOUNT{index} 不是有效 JSON: {exc}") from exc
               env_file = f".env.account{index}"
+              compact_cookie = json.dumps(json.loads(cookie), ensure_ascii=True, separators=(",", ":")).replace("'", "\\u0027")
               Path(env_file).write_text(
-                  f"DOUYIN_COOKIE={json.dumps(cookie)}\nTASK_CONFIG=config/tasks/account{index}.json\n",
+                  f"DOUYIN_COOKIE='{compact_cookie}'\nTASK_CONFIG=config/tasks/account{index}.json\n",
                   encoding="utf-8",
               )
               Path(f"config/tasks/account{index}.json").write_text(config, encoding="utf-8")
@@ -145,23 +146,50 @@ jobs:
             exit 1
           fi
 
+          python -I -S - <<'PY'
+          import json
+          import os
+
+          SENSITIVE_KEYS = {"address", "id", "password", "publicKey", "serverName", "shortId", "spiderX", "host"}
+          SAFE_LITERALS = {"127.0.0.1", "localhost", "::1", "0.0.0.0", "none", "chrome", "tcp", "tls", "reality"}
+
+          def walk(node):
+              if isinstance(node, dict):
+                  for k, v in node.items():
+                      if k in SENSITIVE_KEYS and isinstance(v, (str, int)):
+                          s = str(v).strip()
+                          if len(s) >= 4 and s not in SAFE_LITERALS:
+                              print(f"::add-mask::{s}")
+                      else:
+                          walk(v)
+              elif isinstance(node, list):
+                  for item in node:
+                      walk(item)
+
+          try:
+              walk(json.loads(os.environ.get("XRAY_CONFIG", "{}")))
+          except Exception:
+              pass
+          PY
+
           echo "[1/3] 正在下载并校验 Xray-core (v26.3.27)..."
           XRAY_VER="v26.3.27"
           XRAY_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
-          wget -q -O /tmp/Xray-linux-64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-64.zip"
+          wget -q --tries=3 --timeout=15 -O /tmp/Xray-linux-64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-64.zip"
           echo "${XRAY_SHA256}  /tmp/Xray-linux-64.zip" | sha256sum -c -
           unzip -q -o /tmp/Xray-linux-64.zip -d /tmp/xray
           chmod +x /tmp/xray/xray
 
           echo "[2/3] 正在写入配置并启动本地 SOCKS5 隧道 (127.0.0.1:10808)..."
-          echo "$XRAY_CONFIG" > /tmp/xray/config.json
+          umask 077
+          printf '%s' "$XRAY_CONFIG" > /tmp/xray/config.json
           nohup /tmp/xray/xray run -c /tmp/xray/config.json >/tmp/xray/xray.log 2>&1 &
           sleep 3
 
           echo "[3/3] 正在校验代理隧道连通性与出口 IP..."
           if ! PROXY_IP=$(curl -sS --fail --max-time 12 --retry 2 --socks5-hostname 127.0.0.1:10808 https://api.ip.sb/ip 2>/dev/null || curl -sS --fail --max-time 12 --retry 2 --socks5-hostname 127.0.0.1:10808 https://icanhazip.com 2>/dev/null); then
-            echo "::error::Xray 代理隧道连接失败！以下为 Xray 运行日志："
-            cat /tmp/xray/xray.log
+            echo "::error::Xray 代理隧道连通性校验失败（出于公开仓库安全保护不打印原始节点日志，请检查 XRAY_CONFIG 节点状态）！"
+            rm -f /tmp/xray/config.json /tmp/xray/xray.log
             exit 1
           fi
           PROXY_IP=$(echo "$PROXY_IP" | tr -d '\r\n[:space:]')
@@ -204,6 +232,7 @@ jobs:
           import hashlib
           import time
           import asyncio
+          import logging
           import random
           import re
           from datetime import datetime
@@ -215,6 +244,7 @@ jobs:
               ZoneInfo = None
 
           _CLEAN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+          _MAX_QUOTE_LEN = 200
 
           _SOURCE_BLACKLIST = (
               # Classical books, dynasties, essays, poetry titles & ancient/religious/political authors
@@ -243,18 +273,26 @@ jobs:
               "罗贯中", "施耐庵", "吴承恩", "陈寿", "徐清", "李涉", "宋玉", "司马相如", "班固", "贾谊", "马一浮",
               "汪洙", "郑思肖", "刘桢", "王常月", "溪翁", "郑明河",
               # Religious & Political
-              "圣经", "Holy Bible", "Bible", "新约", "旧约", "福音", "传道书", "启示录", "古兰经", "佛经", "金刚经",
-              "心经", "法华经", "坛经", "楞严经", "四十二章经", "了义经", "阿弥陀经",
+              "圣经", "Holy Bible", "Bible", "新约", "旧约", "福音", "传道书", "启示录", "诗篇", "古兰经", "佛经", "金刚经",
+              "心经", "法华经", "坛经", "楞严经", "四十二章经", "了义经", "阿弥陀经", "华严经", "功德经", "佛典",
               "毛泽东", "毛主席", "毛选", "邓小平", "周恩来", "刘少奇", "朱德", "马克思", "恩格斯", "列宁", "斯大林",
               "托洛茨基", "共产党宣言", "资本论", "习近平", "每日一习话", "毛泽东语录", "毛主席语录", "陈毅",
               "孙中山", "孙中山遗嘱", "国民党", "革命",
           )
 
+          _MODERN_CLASSICAL_IDIOMS = (
+              "似乎", "几乎", "在乎", "关乎", "外乎", "知乎", "微乎", "热乎", "傻乎乎", "胖乎乎", "晕乎乎",
+              "不在乎", "出乎", "合乎", "近乎", "超乎", "异乎", "忙乎", "玄乎", "邪乎", "悬乎",
+              "不亦乐乎", "心不在焉", "语焉不详", "足矣",
+          )
+
+          _AUTHOR_PLACEHOLDERS = ("null", "None", "佚名", "未知", "互联网", "名人名言", "原创", "网络", "一个高三", "-")
+
           _SESSION_USED_UUIDS = set()
           _SESSION_USED_BODIES = set()
           _SESSION_USED_TEXTS = set()
           _PENDING_QUOTES = {}
-          _PENDING_CYCLE_RESETS = {}
+          _DYNAMIC_MESSAGES = set()
           _CACHED_POOL = None
 
           def _install_playwright_proxy_hook():
@@ -382,14 +420,16 @@ jobs:
           def _format_author(who, frm):
               who = (who or "").strip()
               frm = (frm or "").strip()
-              if who in ("null", "None", "\u4f5a\u540d", "-"):
+              if who in _AUTHOR_PLACEHOLDERS:
                   who = ""
-              if frm in ("null", "None", "\u539f\u521b", "\u7f51\u7edc", "\u4e00\u4e2a\u9ad8\u4e09", "-"):
+              if frm in _AUTHOR_PLACEHOLDERS:
                   frm = ""
               bracket_pairs = (("\u300a", "\u300b"), ("<", ">"))
               frm = _strip_paired(frm, bracket_pairs)
               who = _strip_paired(who, bracket_pairs)
               if who and frm and who != frm:
+                  if "\u300a" in frm and "\u300b" in frm:
+                      return f"{who}\u00b7{frm}"
                   return f"{who}\u300a{frm}\u300b"
               return who or frm
 
@@ -407,12 +447,10 @@ jobs:
               raw_h = _clean_text(raw_h)
               if len(raw_h) < 4:
                   return False
-              if not formatted or len(formatted) > 100:
+              if not formatted or len(formatted) > _MAX_QUOTE_LEN:
                   return False
-              # Reject Japanese kana & Korean hangul
               if re.search(r"[\u3040-\u30ff\uac00-\ud7af]", raw_h):
                   return False
-              # Allow bilingual (foreign + Chinese translation), reject pure foreign & short foreign battle cries
               cjk = len(re.findall(r"[\u4e00-\u9fff]", raw_h))
               ascii_letters = sum(1 for c in raw_h if ("a" <= c <= "z") or ("A" <= c <= "Z"))
               if cjk < 4 or (ascii_letters >= 8 and cjk < 6):
@@ -423,19 +461,26 @@ jobs:
                       return False
               if any(kw in raw_h for kw in ("上帝说", "耶和华", "阿门", "阿弥陀佛", "无产阶级", "资产阶级", "共产主义", "跟党走", "革命尚未成功", "社会主义")):
                   return False
+              scrubbed = raw_h
+              for idiom in _MODERN_CLASSICAL_IDIOMS:
+                  scrubbed = scrubbed.replace(idiom, "")
+              if any(p in scrubbed for p in ("矣", "焉", "哉", "乎", "兮", "欤", "曰")):
+                  return False
               modern_hits = sum(raw_h.count(p) for p in ("的", "了", "吗", "呢", "吧", "啊", "着", "在", "是", "我", "你"))
-              classical_hits = sum(raw_h.count(p) for p in ("矣", "焉", "哉", "乎", "兮", "欤", "曰", "吾"))
-              if classical_hits >= 1 and modern_hits == 0:
+              if ("吾" in raw_h or ("者" in raw_h and "也" in raw_h)) and modern_hits == 0:
                   return False
-              if ("者" in raw_h and "也" in raw_h) and modern_hits == 0:
-                  return False
-              has_mod = any(m in raw_h for m in ("的", "了", "吗", "呢", "吧", "啊", "着", "我", "你", "他", "她", "是", "们", "就", "会", "要", "都", "很", "因为", "所以", "如果", "但是", "虽然", "也许", "生活", "世界", "人生")) or bool(re.search(r"在[\u4e00-\u9fff]", raw_h))
-              if not has_mod:
-                  segs = [re.sub(r"[^\u4e00-\u9fff]", "", s) for s in re.split(r"[，。！？；、,!\?;.\s]+", raw_h)]
-                  segs = [s for s in segs if s]
-                  lens = [len(s) for s in segs]
-                  if len(segs) >= 2 and len(set(lens)) == 1 and lens[0] in (5, 7):
-                      return False
+              segs = [re.sub(r"[^\u4e00-\u9fff]", "", s) for s in re.split(r"[，。！？；、,!\?;.\s]+", raw_h)]
+              segs = [s for s in segs if s]
+              lens = [len(s) for s in segs]
+              if len(segs) >= 2 and len(set(lens)) == 1 and lens[0] in (5, 7):
+                  if len(segs) >= 4:
+                      strong_mod = any(m in raw_h for m in ("的", "了", "吗", "呢", "吧", "啊", "着", "们", "你是", "有人", "因为", "所以", "如果", "但是", "虽然", "也许"))
+                      if not strong_mod:
+                          return False
+                  else:
+                      has_mod = any(m in raw_h for m in ("的", "了", "吗", "呢", "吧", "啊", "着", "我", "你", "他", "她", "是", "们", "就", "会", "要", "都", "很", "因为", "所以", "如果", "但是", "虽然", "也许", "生活", "世界", "人生")) or bool(re.search(r"在[\u4e00-\u9fff]", raw_h))
+                      if not has_mod:
+                          return False
               return True
 
           def _is_valid_entry(entry):
@@ -467,10 +512,8 @@ jobs:
           def _parse_sent_state(st):
               sent_uuids = set()
               sent_bodies = set()
-              cycle = 1
               if not isinstance(st, dict):
-                  return sent_uuids, sent_bodies, cycle
-              cycle = int(st.get("cycle") or 1)
+                  return sent_uuids, sent_bodies
               for u in (st.get("sent_uuids") or []):
                   if isinstance(u, str) and u:
                       sent_uuids.add(u)
@@ -484,7 +527,7 @@ jobs:
                           b = _normalize_body(t.split(" —— ")[0])
                           if len(b) >= 4:
                               sent_bodies.add(b)
-              return sent_uuids, sent_bodies, cycle
+              return sent_uuids, sent_bodies
 
           def _load_pool_and_state():
               global _CACHED_POOL
@@ -494,17 +537,16 @@ jobs:
 
               sent_uuids = set()
               sent_bodies = set()
-              cycle = 1
               sent_path = state_dir / "sent.json"
               if sent_path.exists():
                   try:
                       st = json.loads(sent_path.read_text(encoding="utf-8"))
-                      sent_uuids, sent_bodies, cycle = _parse_sent_state(st)
+                      sent_uuids, sent_bodies = _parse_sent_state(st)
                   except Exception as e:
                       print(f"[QuoteFetcher] Warning reading sent.json: {e}", flush=True)
 
               if _CACHED_POOL is not None:
-                  return _CACHED_POOL, sent_uuids, sent_bodies, cycle
+                  return _CACHED_POOL, sent_uuids, sent_bodies
 
               cache_path = state_dir / "pool_cache.json.gz"
               d_raw = _load_bundle_category("d")
@@ -541,7 +583,7 @@ jobs:
                       else:
                           print(f"[QuoteFetcher] Loaded live d+k pool ({len(compact_pool)} entries, cache up-to-date)", flush=True)
                       _CACHED_POOL = compact_pool
-                      return _CACHED_POOL, sent_uuids, sent_bodies, cycle
+                      return _CACHED_POOL, sent_uuids, sent_bodies
 
               if cache_path.exists():
                   try:
@@ -551,11 +593,11 @@ jobs:
                           if compact_pool:
                               print(f"[QuoteFetcher] Loaded quote-state backup cache: {len(compact_pool)} entries", flush=True)
                               _CACHED_POOL = compact_pool
-                              return _CACHED_POOL, sent_uuids, sent_bodies, cycle
+                              return _CACHED_POOL, sent_uuids, sent_bodies
                   except Exception as e:
                       print(f"[QuoteFetcher] Backup cache load err: {e}", flush=True)
 
-              return [], sent_uuids, sent_bodies, cycle
+              return [], sent_uuids, sent_bodies
 
           def _beijing_date_str():
               if ZoneInfo is not None:
@@ -565,21 +607,20 @@ jobs:
                       pass
               return datetime.now().date().isoformat()
 
-          def _record_confirmed_quote(chosen_uuid, sent_text, reset_cycle=None):
+          def _record_confirmed_quote(chosen_uuid, sent_text):
               if not chosen_uuid or not sent_text:
                   return
               if os.environ.get("EVENT_NAME") == "workflow_dispatch" and os.environ.get("IS_DRY_RUN") == "true":
                   return
-              effective_reset = reset_cycle if reset_cycle is not None else _PENDING_CYCLE_RESETS.pop(chosen_uuid, None)
               out_dir = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out"))
               out_dir.mkdir(parents=True, exist_ok=True)
               delta_path = out_dir / "state_delta.json"
-              delta = {"newly_sent": [], "reset_cycle": None}
+              delta = {"newly_sent": []}
               if delta_path.exists():
                   try:
                       delta = json.loads(delta_path.read_text(encoding="utf-8"))
                   except Exception:
-                      pass
+                      delta = {"newly_sent": []}
               existing_u = {item.get("uuid") for item in delta.get("newly_sent", []) if isinstance(item, dict)}
               if chosen_uuid not in existing_u:
                   delta.setdefault("newly_sent", []).append({
@@ -587,27 +628,16 @@ jobs:
                       "text": sent_text,
                       "date": _beijing_date_str(),
                   })
-              if effective_reset is not None:
-                  delta["reset_cycle"] = effective_reset
               delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
 
           def _fetch_quote():
               import urllib.request as _req
 
               rng = random.SystemRandom()
-              pool, sent_uuids, sent_bodies, cycle = _load_pool_and_state()
-              if pool:
-                  delta_path = Path(os.environ.get("QUOTE_OUT_DIR", "/tmp/quote_state_out")) / "state_delta.json"
-                  if delta_path.exists():
-                      try:
-                          delta = json.loads(delta_path.read_text(encoding="utf-8"))
-                          if delta.get("reset_cycle"):
-                              sent_uuids = {item.get("uuid") for item in (delta.get("newly_sent") or []) if isinstance(item, dict) and item.get("uuid")}
-                              sent_bodies = {_normalize_body((item.get("text") or "").split(" —— ")[0]) for item in (delta.get("newly_sent") or []) if isinstance(item, dict) and item.get("text")}
-                              cycle = int(delta["reset_cycle"])
-                      except Exception:
-                          pass
+              pool, sent_uuids, sent_bodies = _load_pool_and_state()
+              pool_exhausted = False
 
+              if pool:
                   available = [
                       e for e in pool
                       if e.get("u") not in sent_uuids
@@ -616,114 +646,71 @@ jobs:
                       and _normalize_body(e.get("h") or "") not in _SESSION_USED_BODIES
                       and _format_entry(e) not in _SESSION_USED_TEXTS
                   ]
-                  wrapped_cycle = None
-                  if not available:
-                      cycle += 1
-                      sent_uuids.clear()
-                      sent_bodies.clear()
-                      wrapped_cycle = cycle
-                      available = [
-                          e for e in pool
-                          if e.get("u") not in _SESSION_USED_UUIDS
-                          and _normalize_body(e.get("h") or "") not in _SESSION_USED_BODIES
-                          and _format_entry(e) not in _SESSION_USED_TEXTS
-                      ] or pool
-                      print(f"[QuoteFetcher] Full pool completed! Starting cycle #{cycle} ({len(available)} entries)", flush=True)
+                  if available:
+                      chosen = rng.choice(available)
+                      text = _format_entry(chosen)
+                      chosen_uuid = chosen.get("u")
+                      if chosen_uuid:
+                          _SESSION_USED_UUIDS.add(chosen_uuid)
+                      _SESSION_USED_BODIES.add(_normalize_body(chosen.get("h") or ""))
+                      _SESSION_USED_TEXTS.add(text)
+                      print(f"[QuoteFetcher] Pool ({chosen.get('t')}, remaining {len(available)-1}/{len(pool)}) -> {text}", flush=True)
+                      return text, chosen_uuid, text
 
-                  chosen = rng.choice(available)
-                  text = _format_entry(chosen)
-                  chosen_uuid = chosen.get("u")
-                  if chosen_uuid and wrapped_cycle is not None:
-                      _PENDING_CYCLE_RESETS[chosen_uuid] = wrapped_cycle
-                  if chosen_uuid:
-                      _SESSION_USED_UUIDS.add(chosen_uuid)
-                  _SESSION_USED_BODIES.add(_normalize_body(chosen.get("h") or ""))
-                  _SESSION_USED_TEXTS.add(text)
-                  print(f"[QuoteFetcher] Pool ({chosen.get('t')}, remaining {len(available)-1}/{len(pool)}, cycle {cycle}) -> {text}", flush=True)
-                  return text, chosen_uuid, text
+                  pool_exhausted = True
+                  print("[QuoteFetcher] Hitokoto d+k pool exhausted; disabling Hitokoto API and falling back to Iciba", flush=True)
 
-              # Fallback P2: Filtered Hitokoto single API (d=88%, k=12%)
+              # Fallback P2: Filtered Hitokoto single API (ONLY when bundle & backup cache could not load)
               headers = {"User-Agent": _CLEAN_UA}
-              for _ in range(4):
-                  cat = "d" if rng.random() < 0.88 else "k"
-                  try:
-                      r = _req.Request(f"https://v1.hitokoto.cn/?c={cat}&max_length=100", headers=headers)
-                      with _req.urlopen(r, timeout=2.5) as resp:
-                          data = json.loads(resp.read().decode("utf-8"))
-                          if _is_valid_entry(data):
-                              text = _format_entry(data)
-                              bkey = _normalize_body(data.get("hitokoto") or "")
-                              uid = data.get("uuid")
-                              if text not in _SESSION_USED_TEXTS and bkey not in _SESSION_USED_BODIES:
-                                  _SESSION_USED_TEXTS.add(text)
-                                  _SESSION_USED_BODIES.add(bkey)
-                                  if uid:
-                                      _SESSION_USED_UUIDS.add(uid)
-                                  print(f"[QuoteFetcher] Hitokoto-API ({cat}) -> {text}", flush=True)
-                                  return text, uid, text
-                  except Exception as e:
-                      print(f"[QuoteFetcher] Hitokoto-API err ({type(e).__name__})", flush=True)
+              if not pool_exhausted:
+                  for _ in range(4):
+                      cat = "d" if rng.random() < 0.88 else "k"
+                      try:
+                          r = _req.Request(f"https://v1.hitokoto.cn/?c={cat}&max_length={_MAX_QUOTE_LEN}", headers=headers)
+                          with _req.urlopen(r, timeout=2.5) as resp:
+                              data = json.loads(resp.read().decode("utf-8"))
+                              if _is_valid_entry(data):
+                                  text = _format_entry(data)
+                                  bkey = _normalize_body(data.get("hitokoto") or "")
+                                  uid = data.get("uuid")
+                                  if (
+                                      (not uid or uid not in sent_uuids)
+                                      and bkey not in sent_bodies
+                                      and (not uid or uid not in _SESSION_USED_UUIDS)
+                                      and text not in _SESSION_USED_TEXTS
+                                      and bkey not in _SESSION_USED_BODIES
+                                  ):
+                                      _SESSION_USED_TEXTS.add(text)
+                                      _SESSION_USED_BODIES.add(bkey)
+                                      if uid:
+                                          _SESSION_USED_UUIDS.add(uid)
+                                      print(f"[QuoteFetcher] Hitokoto-API ({cat}) -> {text}", flush=True)
+                                      return text, uid, text
+                      except Exception as e:
+                          print(f"[QuoteFetcher] Hitokoto-API err ({type(e).__name__})", flush=True)
 
-              # Fallback P3: xygeng.cn/one (original fallback P2; no sent.json, filtered <=100 / non-foreign / non-poem)
-              for _ in range(3):
-                  try:
-                      r = _req.Request("https://api.xygeng.cn/one", headers=headers)
-                      with _req.urlopen(r, timeout=2.5) as resp:
-                          data = json.loads(resp.read().decode("utf-8"))
-                          d = data.get("data")
-                          if not isinstance(d, dict):
-                              continue
-                          if "诗" in str(d.get("tag") or ""):
-                              continue
-                          raw = _clean_text(d.get("content") or "")
-                          who = str(d.get("name") or "")
-                          frm = str(d.get("origin") or "")
-                          text = _format_entry({"hitokoto": raw, "from_who": who, "from": frm})
-                          if _is_clean_content(raw, text, who=who, frm=frm) and text not in _SESSION_USED_TEXTS:
-                              _SESSION_USED_TEXTS.add(text)
-                              print(f"[QuoteFetcher] xygeng -> {text}", flush=True)
-                              return text, None, None
-                  except Exception as e:
-                      print(f"[QuoteFetcher] xygeng err ({type(e).__name__}), fallback to P4", flush=True)
-                      break
-
-              # Fallback P4: SweetNothings (original fallback P3; no sent.json, filtered <=100 / non-foreign / non-poem)
-              for _ in range(3):
-                  try:
-                      r = _req.Request("https://api.lovelive.tools/api/SweetNothings", headers=headers)
-                      with _req.urlopen(r, timeout=2.5) as resp:
-                          raw = _clean_text(resp.read().decode("utf-8"))
-                          if raw.startswith(("{", "[")) or "<html" in raw.lower():
-                              continue
-                          if _is_clean_content(raw, raw) and raw not in _SESSION_USED_TEXTS:
-                              _SESSION_USED_TEXTS.add(raw)
-                              print(f"[QuoteFetcher] SweetNothings -> {raw}", flush=True)
-                              return raw, None, None
-                  except Exception as e:
-                      print(f"[QuoteFetcher] SweetNothings err ({type(e).__name__}), fallback to P5", flush=True)
-                      break
-
-              # Fallback P5: Iciba bilingual API (original fallback P4; en+zh <= 100 or zh <= 100; no pure EN, no truncation, no sent.json)
+              # Fallback P3: Iciba daily bilingual API (en+zh <= 200 or zh <= 200; no pure EN, no truncation, no sent.json)
               try:
                   r = _req.Request("https://open.iciba.com/dsapi/", headers=headers)
                   with _req.urlopen(r, timeout=2.5) as resp:
                       data = json.loads(resp.read().decode("utf-8"))
                       zh = _clean_text(data.get("note", ""))
                       en = _clean_text(data.get("content", ""))
-                      if zh and _is_clean_content(zh, zh) and not re.search(r"[\u3040-\u30ff\uac00-\ud7af]", en):
+                      en_blacklisted = any(kw.lower() in en.lower() for kw in ("bible", "jesus", "god "))
+                      if zh and _is_clean_content(zh, zh) and not en_blacklisted and not re.search(r"[\u3040-\u30ff\uac00-\ud7af]", en):
                           bilingual = f"{en}\uff08{zh}\uff09" if en else ""
-                          text = bilingual if (bilingual and len(bilingual) <= 100) else zh
-                          if len(text) <= 100 and text not in _SESSION_USED_TEXTS:
+                          text = bilingual if (bilingual and len(bilingual) <= _MAX_QUOTE_LEN) else zh
+                          if len(text) <= _MAX_QUOTE_LEN and text not in _SESSION_USED_TEXTS:
                               _SESSION_USED_TEXTS.add(text)
                               print(f"[QuoteFetcher] Iciba -> {text}", flush=True)
                               return text, None, None
               except Exception as e:
                   print(f"[QuoteFetcher] Iciba err ({type(e).__name__}), fallback to local pool", flush=True)
 
-              # Fallback P6: Curated pure modern Chinese literary & philosophical fallback pool (<=100 chars)
+              # Fallback P4: Curated modern Chinese literary & philosophical fallback pool (<= 200 chars, no sent.json)
               fallback_pool = [
-                  "去热爱生活，去奔赴山海 —— 《人民日报》",
-                  "生活原本沉闷，但跑起来就有风 —— 《平凡的世界》",
+                  "去热爱生活，去奔赴山海 —— 人民日报",
+                  "生活原本沉闷，但跑起来就有风 —— 平凡的世界",
                   "日落尤其温柔，人间皆是浪漫 —— 现代随笔",
                   "春来夏往，秋收冬藏，我们来日方长 —— 汪曾祺",
                   "满怀希望，就会所向披靡 —— 巫哲《撒野》",
@@ -749,6 +736,88 @@ jobs:
               print(f"[QuoteFetcher] CuratedFallback -> {fb}", flush=True)
               return fb, None, None
 
+          def _install_app_patches():
+              # 1. Patch app.errors.classify_error: fix substring shadowing so slow DOM renders trigger retry
+              try:
+                  import app.errors as _errors
+                  from app.browser import SearchBoxNotReadyError
+                  _orig_classify = _errors.classify_error
+
+                  def _patched_classify_error(exc):
+                      if isinstance(exc, SearchBoxNotReadyError):
+                          return _errors.ErrorCategory.TRANSIENT
+                      msg = str(exc).lower()
+                      if any(k in msg for k in ("找不到页面元素", "找不到图片上传控件", "找不到原生表情", "无法确认", "element not found", "timeout", "locator", "selector")):
+                          return _errors.ErrorCategory.TRANSIENT
+                      return _orig_classify(exc)
+
+                  _errors.classify_error = _patched_classify_error
+                  try:
+                      import app.main as _main
+                      _main.classify_error = _patched_classify_error
+                  except ImportError:
+                      pass
+              except ImportError:
+                  pass
+
+              # 2. Patch DouyinChat._open_target_once: poll search results up to 5.0s instead of fixed 1.5s blind sleep
+              try:
+                  import app.douyin as _douyin
+                  from app.selectors import SEARCH_INPUTS
+
+                  async def _patched_open_target_once(self, name):
+                      search = await _douyin.first_visible(self.page, SEARCH_INPUTS, self.timeout_ms)
+                      await search.click()
+                      await search.fill("")
+                      await search.fill(name)
+                      await self.page.wait_for_timeout(600)
+                      result = None
+                      for _ in range(11):
+                          result = await self._search_result(name)
+                          if result is not None:
+                              break
+                          await self.page.wait_for_timeout(400)
+                      if result is None:
+                          raise _douyin.PageOperationError("搜索不到目标好友")
+                      await result.click(force=True)
+                      await self._confirm_opened(name)
+
+                  _douyin.DouyinChat._open_target_once = _patched_open_target_once
+              except ImportError:
+                  pass
+
+              # 3. Patch Metrics: compute true mean message send duration & track failed_messages
+              try:
+                  import app.metrics as _metrics
+                  _orig_rec_time = _metrics.Metrics.record_message_time
+                  _orig_rec_fail = _metrics.Metrics.record_target_failure
+                  _orig_finalize = _metrics.Metrics.finalize
+
+                  def _patched_rec_time(self, duration_seconds):
+                      times = getattr(self, "_real_msg_times", None)
+                      if times is None:
+                          times = []
+                          setattr(self, "_real_msg_times", times)
+                      times.append(duration_seconds)
+                      _orig_rec_time(self, duration_seconds)
+
+                  def _patched_rec_fail(self, error_type, sent_count=0):
+                      _orig_rec_fail(self, error_type, sent_count)
+                      if error_type not in ("AuthenticationError", "RiskControlError", "SearchBoxNotReadyError"):
+                          self.failed_messages += 1
+
+                  def _patched_finalize(self):
+                      _orig_finalize(self)
+                      times = getattr(self, "_real_msg_times", None)
+                      if times:
+                          self.average_message_time_seconds = sum(times) / len(times)
+
+                  _metrics.Metrics.record_message_time = _patched_rec_time
+                  _metrics.Metrics.record_target_failure = _patched_rec_fail
+                  _metrics.Metrics.finalize = _patched_finalize
+              except ImportError:
+                  pass
+
           def _install_humanized_sender_hook():
               try:
                   import app.sender as _sender
@@ -757,6 +826,7 @@ jobs:
                   return
 
               _orig_send_message = _sender.send_message
+              _logger = logging.getLogger("douyin_sender")
 
               async def _patched_send_message(page, chat, message, stickers):
                   if message.type == "text" and message.content:
@@ -771,27 +841,45 @@ jobs:
                               val = q
                           else:
                               val = _clean_text(trigger_pattern.sub(lambda _: q, val, count=1))
-                          if len(val) > 100:
-                              val = _clean_text(val[:100])
+                          if len(val) > _MAX_QUOTE_LEN:
+                              val = _clean_text(val[:_MAX_QUOTE_LEN])
+                          _DYNAMIC_MESSAGES.add(val)
                           if chosen_uuid:
-                              pending_reset = _PENDING_CYCLE_RESETS.pop(chosen_uuid, None)
-                              _PENDING_QUOTES[val] = (chosen_uuid, raw_quote_text or val, pending_reset)
+                              _PENDING_QUOTES[val] = (chosen_uuid, raw_quote_text or val)
                           message = type(message)(type="text", content=val)
-                          print(f"[HumanizeHook] Dynamic quote: {val}", flush=True)
+                          _logger.info("[HumanizeHook] Dynamic quote: %s", val)
                   return await _orig_send_message(page, chat, message, stickers)
 
               async def _patched_send_text(chat, content):
-                  content = _clean_text(content)
+                  is_dyn = content in _DYNAMIC_MESSAGES
+                  if is_dyn:
+                      _DYNAMIC_MESSAGES.discard(content)
+                      content = _clean_text(content)
+                      if len(content) > _MAX_QUOTE_LEN:
+                          content = content[:_MAX_QUOTE_LEN]
                   pending_info = _PENDING_QUOTES.pop(content, None)
-                  if len(content) > 100:
-                      content = content[:100]
+
                   editor = await chat.message_input()
                   page = editor.page
                   await editor.click()
-                  await asyncio.sleep(random.uniform(0.6, 1.2))
+                  await asyncio.sleep(random.uniform(0.4, 0.8))
+                  try:
+                      await page.keyboard.press("Control+A")
+                      await page.keyboard.press("Backspace")
+                  except Exception:
+                      pass
+                  await asyncio.sleep(random.uniform(0.2, 0.4))
 
-                  speed = random.uniform(0.04, 0.08) if len(content) > 50 else random.uniform(0.09, 0.18)
-                  p_speed = random.uniform(0.18, 0.30) if len(content) > 50 else random.uniform(0.30, 0.45)
+                  if len(content) > 100:
+                      speed = random.uniform(0.03, 0.06)
+                      p_speed = random.uniform(0.14, 0.24)
+                  elif len(content) > 50:
+                      speed = random.uniform(0.05, 0.09)
+                      p_speed = random.uniform(0.18, 0.30)
+                  else:
+                      speed = random.uniform(0.09, 0.18)
+                      p_speed = random.uniform(0.30, 0.45)
+
                   for char in content:
                       await page.keyboard.insert_text(char)
                       if char in "\uff0c\u3002\uff01\uff1f\uff1b\u3001,.!?":
@@ -801,12 +889,18 @@ jobs:
 
                   try:
                       await page.wait_for_function(
-                          r"""([txt]) => {
-                              const es = [...document.querySelectorAll('[class*=messageEditor] [contenteditable=true], .messageEditorinputArea, [data-contents=true], .DraftEditor-root [contenteditable=true], [contenteditable=true], textarea')];
-                              const target = [...txt].slice(0, 30).join('').replace(/\s+/g, ' ');
-                              return es.some(e => ((e.innerText || e.textContent || e.value || '').replace(/\s+/g, ' ')).includes(target));
+                          r"""([txt, selectors]) => {
+                              const norm = s => (s || '').replace(/[\s\u200B\u200C\u200D\uFEFF]+/g, ' ').trim();
+                              const full = norm(txt);
+                              const head = [...full].slice(0, 25).join('');
+                              const tail = [...full].slice(-15).join('');
+                              const nodes = selectors.flatMap(sel => [...document.querySelectorAll(sel)]);
+                              return nodes.some(e => {
+                                  const val = norm(e.innerText || e.textContent || e.value || '');
+                                  return val.includes(head) && (!tail || val.includes(tail));
+                              });
                           }""",
-                          arg=[content],
+                          arg=[content, list(_sender.MESSAGE_INPUTS)],
                           timeout=5000,
                       )
                   except Exception as exc:
@@ -820,17 +914,21 @@ jobs:
                   try:
                       await _sender._confirm_outgoing_message(page, before, label="\u6587\u5b57", expected_text=content)
                       if pending_info:
-                          _record_confirmed_quote(pending_info[0], pending_info[1], pending_info[2])
+                          _record_confirmed_quote(pending_info[0], pending_info[1])
                   except PageOperationError as exc:
                       if "\u9875\u9762\u63d0\u793a\u53ef\u4ee5\u91cd\u8bd5" in str(exc):
                           print("[HumanizeHook] Detected red exclamation mark, attempting click retry...", flush=True)
                           await page.wait_for_timeout(1500)
                           if await _sender._click_retry_on_latest_failed_message(page):
                               latest = page.locator(_sender.LATEST_OUTGOING_MESSAGE).first
+                              for _ in range(4):
+                                  await page.wait_for_timeout(300)
+                                  if await _sender._marker_visible(latest, _sender.SEND_PENDING_MARKERS) or not await _sender._marker_visible(latest, _sender.SEND_FAILURE_MARKERS):
+                                      break
                               await _sender._await_send_terminal_state(page, latest, "\u6587\u5b57")
                               print("[HumanizeHook] Retry click succeeded!", flush=True)
                               if pending_info:
-                                  _record_confirmed_quote(pending_info[0], pending_info[1], pending_info[2])
+                                  _record_confirmed_quote(pending_info[0], pending_info[1])
                               return
                       raise
 
@@ -839,6 +937,7 @@ jobs:
               print("[HumanizeHook] Mounted humanized sender hook successfully", flush=True)
 
           _install_playwright_proxy_hook()
+          _install_app_patches()
           _install_humanized_sender_hook()
           EOF
 
@@ -879,7 +978,6 @@ jobs:
 
       - name: Persist quote-state branch (回写已发防重记录)
         if: always() && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run == true || inputs.dry_run == 'true'))
-        continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -898,7 +996,7 @@ jobs:
             exit 0
           fi
 
-          python -I - <<'PY'
+          cat << 'PY' > /tmp/merge_quote_state.py
           import json
           import re
           import shutil
@@ -931,49 +1029,63 @@ jobs:
           if delta_path.exists():
               delta = json.loads(delta_path.read_text(encoding="utf-8"))
               newly = [item for item in (delta.get("newly_sent") or []) if isinstance(item, dict) and item.get("uuid")]
-              if delta.get("reset_cycle"):
-                  state["cycle"] = int(delta["reset_cycle"])
-                  state["sent"] = newly
-              else:
-                  existing = list(state.get("sent") or [])
-                  seen_u = {x.get("uuid") for x in existing if isinstance(x, dict) and x.get("uuid")}
-                  seen_b = {_norm_body(x.get("text") or "") for x in existing if isinstance(x, dict) and x.get("text")}
-                  for item in newly:
-                      u = item.get("uuid")
-                      b = _norm_body(item.get("text") or "")
-                      if u not in seen_u and (not b or b not in seen_b):
-                          existing.append({
-                              "uuid": u,
-                              "text": item.get("text") or "",
-                              "date": item.get("date") or "",
-                          })
-                          seen_u.add(u)
-                          if b:
-                              seen_b.add(b)
+              existing = list(state.get("sent") or [])
+              seen_u = {x.get("uuid") for x in existing if isinstance(x, dict) and x.get("uuid")}
+              seen_b = {_norm_body(x.get("text") or "") for x in existing if isinstance(x, dict) and x.get("text")}
+              changed = False
+              for item in newly:
+                  u = item.get("uuid")
+                  b = _norm_body(item.get("text") or "")
+                  if u not in seen_u and (not b or b not in seen_b):
+                      existing.append({
+                          "uuid": u,
+                          "text": item.get("text") or "",
+                          "date": item.get("date") or "",
+                      })
+                      seen_u.add(u)
+                      if b:
+                          seen_b.add(b)
+                      changed = True
+              if changed or not sent_path.exists():
                   state["sent"] = existing
-              state["updated_at"] = datetime.now(timezone.utc).isoformat()
-              sent_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+                  state["updated_at"] = datetime.now(timezone.utc).isoformat()
+                  sent_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
           new_pool = out_dir / "pool_cache.json.gz"
           if new_pool.exists():
               shutil.copyfile(new_pool, state_dir / "pool_cache.json.gz")
           PY
 
-          if [ -z "$(git -C "$STATE_DIR" status --porcelain)" ]; then
-            echo "quote-state 无实际文件变化，跳过推送"
-            exit 0
-          fi
-
+          REMOTE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          BJT_DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)
           git -C "$STATE_DIR" config user.name "github-actions[bot]"
           git -C "$STATE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "$STATE_DIR" add sent.json pool_cache.json.gz 2>/dev/null || git -C "$STATE_DIR" add -A
-          git -C "$STATE_DIR" commit -q -m "chore(quote-state): record sent quotes ($(date -u +%Y-%m-%d))"
-          REMOTE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          if ! git -C "$STATE_DIR" push -q "$REMOTE_URL" HEAD:quote-state; then
-            git -C "$STATE_DIR" pull --rebase -q "$REMOTE_URL" quote-state || true
-            git -C "$STATE_DIR" push -q "$REMOTE_URL" HEAD:quote-state
+
+          PUSH_OK=0
+          for ATTEMPT in 1 2 3; do
+            python -I -S /tmp/merge_quote_state.py
+            if [ -z "$(git -C "$STATE_DIR" status --porcelain)" ]; then
+              echo "quote-state 无实际文件变化，跳过推送"
+              PUSH_OK=1
+              break
+            fi
+            git -C "$STATE_DIR" add sent.json pool_cache.json.gz 2>/dev/null || git -C "$STATE_DIR" add -A
+            git -C "$STATE_DIR" commit -q -m "chore(quote-state): record sent quotes (${BJT_DATE})"
+            if git -C "$STATE_DIR" push -q "$REMOTE_URL" HEAD:quote-state; then
+              echo "quote-state 已安全同步至远端分支！"
+              PUSH_OK=1
+              break
+            fi
+            echo "第 ${ATTEMPT} 次推送冲突或网络抖动，重新拉取远端最新状态合并重试..."
+            if git -C "$STATE_DIR" fetch --depth=1 "$REMOTE_URL" quote-state 2>/dev/null; then
+              git -C "$STATE_DIR" checkout -f -q -B quote-state FETCH_HEAD
+            fi
+            sleep 2
+          done
+          rm -f /tmp/merge_quote_state.py
+          if [ "$PUSH_OK" -ne 1 ]; then
+            echo "::warning::quote-state 分支经 3 次重试仍未能推送成功，请检查仓库权限或网络状态！"
           fi
-          echo "quote-state 已安全同步至远端分支！"
 
       - name: Encrypt diagnostics artifacts (7-Zip AES-256)
         if: failure()
@@ -983,7 +1095,7 @@ jobs:
         run: |
           set -e
           # 1. 彻底移除包含 Cookie/网络请求头的 Playwright trace 抓包，防止凭据外泄
-          rm -rf artifacts/traces
+          find artifacts -type d -name traces -exec rm -rf {} + 2>/dev/null || true
 
           # 2. 检查是否有需要加密上传的诊断文件
           if [ ! -d "artifacts" ] || [ -z "$(ls -A artifacts 2>/dev/null)" ]; then
